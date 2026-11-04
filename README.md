@@ -67,8 +67,31 @@ Then run it:
 Or by hand, for a try-out:
 
 ```bash
-./clauxy start
+clauxy start
+clauxy stop
 ```
+
+### Running it as a service
+
+```bash
+clauxy service install      # start on login, restart on crash
+clauxy service status
+clauxy service uninstall
+```
+
+| Platform | What gets installed |
+|---|---|
+| macOS | a launchd agent in `~/Library/LaunchAgents/com.clauxy.proxy.plist`, with `RunAtLoad` and `KeepAlive` |
+| Linux | a systemd user unit in `~/.config/systemd/user/clauxy.service`, with `Restart=always` |
+
+Both start clauxy when you log in and bring it back if it dies — verified on
+macOS with `kill -9`, back in under 10 seconds.
+
+This matters more than it looks: whatever points at clauxy has no fallback. If
+the proxy is down, those clients are talking to a dead port.
+
+While the service owns the port, `clauxy stop` will not touch it and says so;
+use `clauxy service uninstall`.
 
 ## Point your tools at it
 
