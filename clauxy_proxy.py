@@ -34,6 +34,10 @@ import urllib.request
 import zlib
 from datetime import datetime, timedelta, timezone
 
+if sys.version_info < (3, 10):
+    sys.exit(f"clauxy needs Python 3.10 or newer (this is "
+             f"{sys.version_info.major}.{sys.version_info.minor}).")
+
 UPSTREAM = os.environ.get("CLAUXY_UPSTREAM", "https://api.anthropic.com")
 HOME = os.path.expanduser(os.environ.get("CLAUXY_HOME", "~/.clauxy"))
 TOKENS = os.path.join(HOME, "tokens")
@@ -82,9 +86,9 @@ PRICES = {
 DEFAULT_PRICE = {"in": 2.00, "out": 10.00, "cache_read": 0.20}
 
 
-def cost_usd(modelo, usage):
+def cost_usd(model_, usage):
     """Indicative USD cost of one request, at public API list prices."""
-    p = PRICES.get(modelo or "", DEFAULT_PRICE)
+    p = PRICES.get(model_ or "", DEFAULT_PRICE)
     # Cache writes bill at 1.25x input; cache reads at the reduced rate.
     return (
         usage.get("input", 0) * p["in"]
@@ -122,7 +126,7 @@ def usage_from_body(buffer):
     response, which has `usage` at the root.
     """
     usage = {"input": 0, "output": 0, "cache_write": 0, "cache_read": 0}
-    modelo = None
+    model_ = None
 
     # Non-streaming response: plain JSON with `usage` at the top.
     try:
@@ -147,7 +151,7 @@ def usage_from_body(buffer):
             continue
         if item.get("type") == "message_start":
             msg = item.get("message", {})
-            modelo = msg.get("model") or modelo
+            model_ = msg.get("model") or model_
             u = msg.get("usage", {})
             usage["input"] = u.get("input_tokens", 0)
             usage["cache_write"] = u.get("cache_creation_input_tokens", 0) or 0
@@ -157,7 +161,7 @@ def usage_from_body(buffer):
             u = item.get("usage", {})
             if u.get("output_tokens") is not None:
                 usage["output"] = u["output_tokens"]
-    return modelo, usage
+    return model_, usage
 
 
 LABELS_FILE = os.path.join(HOME, "accounts.json")
@@ -343,10 +347,10 @@ class Account:
         self.quota_error = None
         self.limit_text = None   # the last 429's message, if any
 
-    def anota(self, modelo, usage):
+    def anota(self, model_, usage):
         for clave in self.tokens:
             self.tokens[clave] += usage.get(clave, 0)
-        self.usd += cost_usd(modelo, usage)
+        self.usd += cost_usd(model_, usage)
 
     def _pct(self, which):
         pct, _, _ = self.window(which)
@@ -424,7 +428,9 @@ class Account:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     item = json.loads(resp.read())
             except urllib.error.HTTPError as exc:
-                self.quota_error = ("no permission (setup-token)"
+                # Not an error: a work token simply cannot read telemetry.
+                # Say what to do about it instead of flashing a failure.
+                self.quota_error = (f"quota unknown - run: clauxy login {self.alias}"
                                     if exc.code == 403 else f"HTTP {exc.code}")
                 continue
             except Exception as exc:
@@ -814,6 +820,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # -- proxy ---------------------------------------------------------------
 
     def _handle(self, method):
+        # A bare http://host:port/ is what anyone tries first: send it to the
+        # panel instead of forwarding it upstream as a bad request.
+        if self.path in ("/", "/_estado", "/_estado.json") and method == "GET":
+            target = "/_status.json" if self.path.endswith(".json") else "/_status"
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path in ("/_status", "/_status.json"):
             self._panel(self.path.endswith(".json"))
             return
@@ -823,10 +838,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
-        modelo_pedido = None
+        requested_model = None
         if body:
             try:
-                modelo_pedido = json.loads(body).get("model")
+                requested_model = json.loads(body).get("model")
             except (ValueError, UnicodeDecodeError):
                 pass
 
@@ -835,7 +850,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if k.lower() not in HOP_BY_HOP
         }
 
-        empezado = time.time()
+        started_at = time.time()
         tried = []
         # The account the client brought wins, while it can still serve.
         preferred = self.pool.account_for_token(self.headers.get("Authorization"))
@@ -874,7 +889,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     with self.pool.lock:
                         self.pool.active = account.alias
                     self._relay(status, resp_headers, stream, account,
-                                modelo_pedido, empezado, False, preferred,
+                                requested_model, started_at, False, preferred,
                                 prefetched=body_seen.encode(errors="replace"))
                     return
 
@@ -891,9 +906,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 tried.append(f"{account.alias}:{status}")
                 self.pool.log_request({
                     "time": time.strftime("%H:%M:%S"),
-                    "model": modelo_pedido, "account": account.alias,
+                    "path": self.path,
+                    "model": requested_model, "account": account.alias,
                     "status": status, "switched": True, "own": True,
-                    "ms": int((time.time() - empezado) * 1000),
+                    "ms": int((time.time() - started_at) * 1000),
                     "tokens": None, "usd": None,
                 })
                 sys.stderr.write(
@@ -907,7 +923,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with self.pool.lock:
                 self.pool.active = account.alias
             self._relay(status, resp_headers, stream, account,
-                        modelo_pedido, empezado, bool(tried), preferred)
+                        requested_model, started_at, bool(tried), preferred)
             return
 
         self.send_error(502, "no account answered: " + ", ".join(tried))
@@ -932,7 +948,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return None, None, None, type(exc).__name__
 
     def _relay(self, status, resp_headers, stream, account,
-               modelo_pedido, empezado, conmuto, preferred=None, prefetched=b""):
+               requested_model, started_at, switched_, preferred=None, prefetched=b""):
         """Streams the response through, counting tokens on the way."""
         self.send_response(status)
         for key, value in resp_headers.items():
@@ -965,17 +981,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         finally:
             stream.close()
 
-        modelo, usage = usage_from_body(
+        model_, usage = usage_from_body(
             decompress(bytes(seen), resp_headers.get("content-encoding")))
-        modelo = modelo or modelo_pedido
-        usd = cost_usd(modelo, usage)
-        account.anota(modelo, usage)
+        model_ = model_ or requested_model
+        usd = cost_usd(model_, usage)
+        account.anota(model_, usage)
         self.pool.log_request({
             "time": time.strftime("%H:%M:%S"),
-            "model": modelo, "account": account.alias,
-            "status": status, "switched": conmuto,
+            # The path is what makes a 404 or a 400 diagnosable at all.
+            "path": self.path,
+            "model": model_, "account": account.alias,
+            "status": status, "switched": switched_,
             "own": preferred is None or account is preferred,
-            "ms": int((time.time() - empezado) * 1000),
+            "ms": int((time.time() - started_at) * 1000),
             "tokens": usage, "usd": round(usd, 5),
         })
 
@@ -1111,7 +1129,8 @@ def render_panel(snap):
   </dl>
   <p class="detail">in {thousands(tk['input'])} · out {thousands(tk['output'])}
      · cache write {thousands(tk['cache_write'])} · cache read {thousands(tk['cache_read'])}
-     {'· <b class="err">' + c['quota_error_'] + '</b>' if c['quota_error_'] else ''}</p>
+     {'· <b class="' + ('hintful' if 'clauxy login' in c['quota_error_'] else 'err')
+       + '">' + c['quota_error_'] + '</b>' if c['quota_error_'] else ''}</p>
 
   <form method="post" action="/_control" class="actions">
     <input type="hidden" name="alias" value="{c['alias']}">
@@ -1144,7 +1163,8 @@ def render_panel(snap):
         if not e.get("own", True):
             mark += ' <b class="sw">borrowed</b>'
         rows.append(
-            f'<tr class="{cls}"><td>{e["time"]}</td><td>{e["model"] or "?"}</td>'
+            f'<tr class="{cls}"><td>{e["time"]}</td>'
+            f'<td>{e["model"] or e.get("path") or "?"}</td>'
             f'<td><b>{e["account"]}</b>{mark}</td><td>{e["status"]}</td>'
             f'<td>{detail}</td>'
             f'<td>{"$%.5f" % e["usd"] if e["usd"] is not None else "—"}</td>'
@@ -1224,6 +1244,7 @@ dd{{margin:2px 0 0}}
 .big{{font-size:17px;font-variant-numeric:tabular-nums}}
 .detail{{color:var(--mut);font-size:11.5px;margin:4px 0 0}}
 .err{{color:var(--err)}}
+.hintful{{color:var(--mut);font-weight:500}}
 .actions{{display:flex;gap:7px;margin-top:14px;flex-wrap:wrap}}
 button{{font:inherit;font-size:12px;padding:5px 11px;border:1px solid var(--line);
 background:var(--bg);color:var(--fg);border-radius:7px;cursor:pointer}}

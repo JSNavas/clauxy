@@ -29,6 +29,10 @@ import time
 import urllib.error
 import urllib.request
 
+if sys.version_info < (3, 10):
+    sys.exit(f"clauxy needs Python 3.10 or newer (this is "
+             f"{sys.version_info.major}.{sys.version_info.minor}).")
+
 HOME = os.path.expanduser(os.environ.get("CLAUXY_HOME", "~/.clauxy"))
 TOKENS = os.path.join(HOME, "tokens")
 SESSIONS = os.path.join(HOME, "sessions")
@@ -67,6 +71,20 @@ def banner(subtitle=""):
     print(BANNER.rstrip("\n"))
     print(f"{dim}  one endpoint, many Claude subscriptions"
           f"{' · ' + subtitle if subtitle else ''}   v{VERSION}{reset}\n")
+
+
+def require_claude_cli():
+    """The Claude CLI does the sign-in and is the only honest token check.
+
+    Without this the first thing a new user sees is a FileNotFoundError
+    traceback from subprocess, which says nothing about what to install.
+    """
+    from shutil import which
+    if which("claude") is None:
+        sys.exit(
+            "the Claude CLI is not on your PATH.\n"
+            "clauxy uses it to sign in and to verify tokens.\n"
+            "Install it from https://claude.com/claude-code and try again.")
 
 
 def token_path(alias):
@@ -196,6 +214,7 @@ def token_works(token, cfg):
 
 def cmd_add(args):
     banner("adding an account")
+    require_claude_cli()
     cfg = os.path.join(SESSIONS, args.alias)
     os.makedirs(cfg, exist_ok=True)
     print(f"Isolated config dir: {cfg}")
@@ -314,6 +333,7 @@ def cmd_login(args):
     account that has not served anything yet has none. Client requests keep
     using the long-lived token; this credential is only ever read.
     """
+    require_claude_cli()
     cfg = os.path.join(SESSIONS, args.alias)
     os.makedirs(cfg, exist_ok=True)
     labels = read_labels()
@@ -396,8 +416,10 @@ def proxy_answers(port, tries=1):
 
 def cmd_start(args):
     banner('starting')
-    if proxy_pid():
-        print("already running")
+    # Ask the port, not just "is some clauxy alive": the service may own 4000
+    # while you start a second instance elsewhere.
+    if proxy_answers(args.port):
+        print(f"already serving on port {args.port}")
         return
     os.makedirs(HOME, exist_ok=True)
     with open(LOGFILE, "ab") as log:
