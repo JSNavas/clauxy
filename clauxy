@@ -573,6 +573,32 @@ def cmd_check(args):
     os.execv(sys.executable, [sys.executable, PROXY, "--check"])
 
 
+USAGE = """Getting started:
+  clauxy add <alias>              register a Claude subscription
+  clauxy service install          run on login, restart on crash
+
+Daily use:
+  clauxy status                   is it up? which account is serving?
+  clauxy list                     accounts and labels
+  clauxy start | stop             run the proxy by hand
+
+Accounts:
+  clauxy label <alias> <text>     name an account in the panel
+  clauxy login <alias>            read quota for accounts with no traffic yet
+  clauxy remove <alias>           forget an account
+  clauxy check                    try every account with the real Claude CLI
+
+Point your tools at it:
+  export ANTHROPIC_BASE_URL=http://127.0.0.1:4000
+
+Panel:
+  http://127.0.0.1:4000/_status
+
+Further help:
+  clauxy <command> --help
+  https://github.com/JSNavas/clauxy"""
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="clauxy",
@@ -581,7 +607,9 @@ def main():
         epilog="\n".join(__doc__.splitlines()[2:]))
     parser.add_argument("-v", "--version", action="version",
                         version=f"clauxy {VERSION}")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    # Not required: a bare `clauxy` should say what it can do, the way most
+    # tools do, instead of an argparse error about a missing argument.
+    sub = parser.add_subparsers(dest="cmd")
 
     p = sub.add_parser("add", help="register an account")
     p.add_argument("alias")
@@ -621,6 +649,10 @@ def main():
     p.set_defaults(func=cmd_check)
 
     args = parser.parse_args()
+    if not args.cmd:
+        banner()
+        print(USAGE)
+        return
     args.func(args)
 
 
