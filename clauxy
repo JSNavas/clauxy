@@ -1,0 +1,572 @@
+#!/usr/bin/env python3
+"""clauxy - one endpoint for many Claude subscriptions.
+
+    clauxy add <alias>            register an account (runs `claude setup-token`)
+    clauxy list                   accounts and labels
+    clauxy label <alias> <text>   name an account in the panel
+    clauxy remove <alias>         forget an account
+
+    clauxy start | stop | status  run the proxy by hand
+    clauxy service install|uninstall|status
+                                  run it on login and restart it on crash
+
+    clauxy login <alias>          optional: read quota for idle accounts too
+    clauxy check                  try every account with the real Claude CLI
+
+Everything lives under ~/.clauxy (override with CLAUXY_HOME).
+"""
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import re
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+HOME = os.path.expanduser(os.environ.get("CLAUXY_HOME", "~/.clauxy"))
+TOKENS = os.path.join(HOME, "tokens")
+SESSIONS = os.path.join(HOME, "sessions")
+LABELS_FILE = os.path.join(HOME, "accounts.json")
+PIDFILE = os.path.join(HOME, "clauxy.pid")
+LOGFILE = os.path.join(HOME, "clauxy.log")
+KEYCHAIN_PREFIX = "clauxy-account-"
+SERVICE = "com.clauxy.proxy"
+PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{SERVICE}.plist")
+SYSTEMD = os.path.expanduser("~/.config/systemd/user/clauxy.service")
+PROXY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clauxy_proxy.py")
+
+TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{20,}")
+IS_MAC = sys.platform == "darwin"
+
+
+def token_path(alias):
+    return os.path.join(TOKENS, f"{alias}.token")
+
+
+def save_token(alias, token, keychain=False):
+    if keychain and IS_MAC:
+        subprocess.run(["security", "add-generic-password", "-U",
+                        "-s", KEYCHAIN_PREFIX + alias, "-a", alias, "-w", token],
+                       check=True)
+        return "macOS Keychain"
+    os.makedirs(TOKENS, exist_ok=True)
+    os.chmod(TOKENS, 0o700)
+    path = token_path(alias)
+    with open(os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600), "w") as fh:
+        fh.write(token + "\n")
+    return path
+
+
+def read_token(alias):
+    try:
+        with open(token_path(alias)) as fh:
+            token = fh.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    if IS_MAC:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_PREFIX + alias, "-w"],
+            capture_output=True, text=True)
+        if out.returncode == 0:
+            return out.stdout.strip()
+    return None
+
+
+def all_accounts():
+    try:
+        found = {f[:-6] for f in os.listdir(TOKENS) if f.endswith(".token")}
+    except OSError:
+        found = set()
+    if IS_MAC:
+        out = subprocess.run(["security", "dump-keychain"],
+                             capture_output=True, text=True)
+        found |= set(re.findall(
+            r'"' + re.escape(KEYCHAIN_PREFIX) + r'([^"]+)"', out.stdout))
+    return sorted(found)
+
+
+def read_labels():
+    try:
+        with open(LABELS_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def write_label(alias, label):
+    data = read_labels()
+    data[alias] = label
+    os.makedirs(HOME, exist_ok=True)
+    with open(LABELS_FILE, "w") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+
+
+def run_showing(cmd, env):
+    """Runs a command, echoing its output while capturing it.
+
+    Not `capture_output`: with the output on a pipe the child loses the
+    terminal and Ctrl+C never reaches it, so an interrupted sign-in is left
+    suspended in the background instead of dying.
+    """
+    proc = subprocess.Popen(cmd, env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=None, bufsize=1)
+    lines = []
+    try:
+        for line in proc.stdout:
+            lines.append(line)
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        proc.wait()
+    except KeyboardInterrupt:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        print("\ninterrupted; nothing saved")
+        raise SystemExit(130)
+    finally:
+        if proc.stdout:
+            proc.stdout.close()
+    return "".join(lines) if proc.returncode == 0 else None
+
+
+def token_works(token, cfg):
+    """Runs the real CLI with that token and classifies the result.
+
+    Returns ("ok" | "no_quota" | "invalid", message).
+
+    The distinction matters: a GOOD token whose account is out of quota fails
+    exactly like a bad one, but it must still be saved - that is the account
+    you are about to pool. Only a 401 means the token is useless. A hand-built
+    request is no use here: the API answers 429 to any client it does not
+    recognise as the CLI, so the CLI is the judge.
+    """
+    run = subprocess.run(
+        ["claude", "-p", "say OK", "--model", "claude-haiku-5-5"],
+        env={**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": token,
+             "CLAUDE_CONFIG_DIR": cfg},
+        capture_output=True, text=True, timeout=180,
+    )
+    out = (run.stdout or run.stderr or "").strip()
+    if run.returncode == 0:
+        return "ok", out.splitlines()[0][:120] if out else ""
+    first = out.splitlines()[0][:160] if out else "no output"
+    low = out.lower()
+    if ("401" in low or "token is invalid" in low or "authenticate" in low) \
+            and not any(x in low for x in ("limit", "quota", "rate")):
+        return "invalid", first
+    if any(x in low for x in ("limit", "quota", "rate", "429")):
+        return "no_quota", first
+    return "invalid", first
+
+
+def cmd_add(args):
+    cfg = os.path.join(SESSIONS, args.alias)
+    os.makedirs(cfg, exist_ok=True)
+    print(f"Isolated config dir: {cfg}")
+    print("A browser will open. Sign in with THE ACCOUNT YOU ARE ADDING -")
+    print("use a private window if another session is already signed in.\n")
+
+    # The token is CAPTURED from the output, never pasted: a pasted token
+    # arrives truncated when the terminal wraps the line, and the trimmed
+    # result looks valid but returns 401.
+    out = run_showing(["claude", "setup-token"],
+                      {**os.environ, "CLAUDE_CONFIG_DIR": cfg})
+    if out is None:
+        sys.exit("sign-in did not complete; nothing saved")
+
+    found = TOKEN_RE.findall(out)
+    if found:
+        token = max(found, key=len)
+        print(f"\ncaptured token from output ({len(token)} chars)")
+    else:
+        print("\nCould not capture the token. Paste it whole")
+        print("(triple-click the line; dragging truncates it):")
+        token = getpass.getpass("token (hidden): ").strip()
+    if not TOKEN_RE.fullmatch(token):
+        sys.exit("that does not look like a setup token (sk-ant-oat01-...)")
+
+    print("\nchecking the token with a real request...")
+    verdict, message = token_works(token, cfg)
+    if verdict == "invalid":
+        sys.exit(f"   {message}\n\nThat token does not authenticate. Nothing saved.")
+
+    where = save_token(args.alias, token, keychain=args.keychain)
+    print(f"OK. Saved to {where}")
+    if verdict == "no_quota":
+        print("   NOTE: authenticates fine but is out of quota right now.")
+        print(f"   {message}")
+        print("   The token is valid and kept; clauxy skips it until it resets.")
+
+    label = input("Label for the panel (email, Enter to skip): ").strip()
+    if label:
+        write_label(args.alias, label)
+
+
+def cmd_list(args):
+    labels = read_labels()
+    accounts = all_accounts()
+    if not accounts:
+        print("no accounts yet - run: clauxy add <alias>")
+        return
+    for alias in accounts:
+        token = read_token(alias)
+        tail = token[-8:] if token else "??"
+        print(f"{alias:10} ...{tail}  {labels.get(alias, '(no label)')}")
+
+
+def cmd_label(args):
+    if not args.label:
+        labels = read_labels()
+        for alias in all_accounts():
+            print(f"  {alias:10} {labels.get(alias, '(no label)')}")
+        return
+    write_label(args.alias, args.label)
+    print(f"{args.alias} -> {args.label}")
+    print("restart the proxy to show it in the panel")
+
+
+def cmd_remove(args):
+    gone = []
+    if os.path.exists(token_path(args.alias)):
+        os.unlink(token_path(args.alias))
+        gone.append("token file")
+    if IS_MAC:
+        out = subprocess.run(["security", "delete-generic-password",
+                              "-s", KEYCHAIN_PREFIX + args.alias],
+                             capture_output=True)
+        if out.returncode == 0:
+            gone.append("keychain entry")
+    labels = read_labels()
+    if labels.pop(args.alias, None) is not None:
+        with open(LABELS_FILE, "w") as fh:
+            json.dump(labels, fh, indent=2, sort_keys=True)
+        gone.append("label")
+    print(f"removed {args.alias}: {', '.join(gone) if gone else 'nothing found'}")
+
+
+def session_credential(alias):
+    """What `claude auth login` left for that config dir.
+
+    On macOS it is NOT a file: it goes to the Keychain, one entry per config
+    folder, named `Claude Code-credentials-<sha256(folder)[:8]>`. The user's
+    own session lives in `Claude Code-credentials`, with no suffix.
+    """
+    folder = os.path.join(SESSIONS, alias)
+    try:
+        with open(os.path.join(folder, ".credentials.json")) as fh:
+            return json.load(fh).get("claudeAiOauth") or None
+    except (OSError, ValueError):
+        pass
+    if not IS_MAC:
+        return None
+    suffix = hashlib.sha256(folder.encode()).hexdigest()[:8]
+    out = subprocess.run(["security", "find-generic-password",
+                          "-s", f"Claude Code-credentials-{suffix}", "-w"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return None
+    try:
+        return json.loads(out.stdout.strip()).get("claudeAiOauth") or None
+    except ValueError:
+        return None
+
+
+def cmd_login(args):
+    """Optional sign-in so clauxy can read quota for accounts with no traffic.
+
+    Quota normally arrives free in the headers of each response, but an
+    account that has not served anything yet has none. Client requests keep
+    using the long-lived token; this credential is only ever read.
+    """
+    cfg = os.path.join(SESSIONS, args.alias)
+    os.makedirs(cfg, exist_ok=True)
+    labels = read_labels()
+    print(f"Isolated config dir: {cfg}")
+    if labels.get(args.alias):
+        print(f"Sign in as {labels[args.alias]}")
+    print("Use a private window if another session is already signed in.\n")
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": cfg}
+    try:
+        if subprocess.run(["claude", "auth", "login"], env=env).returncode != 0:
+            sys.exit("sign-in did not complete")
+    except KeyboardInterrupt:
+        sys.exit(130)
+
+    oauth = session_credential(args.alias)
+    if not oauth:
+        sys.exit("sign-in left no readable credential for this folder.")
+    req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage")
+    req.add_header("Authorization", "Bearer " + (oauth.get("accessToken") or ""))
+    req.add_header("anthropic-beta", "oauth-2025-04-20")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            usage = json.load(resp)
+        five = (usage.get("five_hour") or {}).get("utilization")
+        week = (usage.get("seven_day") or {}).get("utilization")
+        print(f"OK. {args.alias} now reports quota: 5h {five}% - weekly {week}%")
+        print("Restart the proxy to see it: clauxy stop && clauxy start")
+    except urllib.error.HTTPError as exc:
+        sys.exit(f"signed in, but quota still returns {exc.code}.")
+
+
+def service_loaded():
+    if IS_MAC:
+        out = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+        return SERVICE in out.stdout
+    out = subprocess.run(["systemctl", "--user", "is-enabled", "clauxy"],
+                         capture_output=True, text=True)
+    return out.returncode == 0
+
+
+def service_pid():
+    if not IS_MAC:
+        return None
+    out = subprocess.run(["launchctl", "list"], capture_output=True, text=True)
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == SERVICE:
+            return int(parts[0]) if parts[0].isdigit() else None
+    return None
+
+
+def proxy_pid():
+    from_service = service_pid()
+    if from_service:
+        return from_service
+    try:
+        with open(PIDFILE) as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        os.unlink(PIDFILE)
+        return None
+    return pid
+
+
+def proxy_answers(port, tries=1):
+    for i in range(tries):
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/_status.json", timeout=3) as r:
+                return json.load(r)
+        except (urllib.error.URLError, OSError, ValueError):
+            if i + 1 < tries:
+                time.sleep(1)
+    return None
+
+
+def cmd_start(args):
+    if proxy_pid():
+        print("already running")
+        return
+    os.makedirs(HOME, exist_ok=True)
+    with open(LOGFILE, "ab") as log:
+        # PYTHONUNBUFFERED: without it Python holds output in memory and a
+        # crash loses the whole log. start_new_session: survives the terminal.
+        proc = subprocess.Popen(
+            [sys.executable, "-u", PROXY, "--port", str(args.port)],
+            stdout=log, stderr=log, stdin=subprocess.DEVNULL,
+            start_new_session=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"})
+    with open(PIDFILE, "w") as fh:
+        fh.write(str(proc.pid))
+    if proxy_answers(args.port, tries=25):
+        print(f"clauxy running (pid {proc.pid})")
+        print(f"  PANEL     http://127.0.0.1:{args.port}/_status")
+        print(f"  ENDPOINT  http://127.0.0.1:{args.port}")
+    else:
+        print(f"started but did not answer. See {LOGFILE}")
+
+
+def cmd_stop(args):
+    if service_loaded():
+        print("managed by the service: use `clauxy service uninstall`")
+        return
+    pid = proxy_pid()
+    if not pid:
+        print("not running")
+        return
+    os.kill(pid, signal.SIGTERM)
+    for _ in range(50):
+        if not proxy_pid():
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(pid, signal.SIGKILL)
+    if os.path.exists(PIDFILE):
+        os.unlink(PIDFILE)
+    print(f"stopped (pid {pid})")
+
+
+def cmd_status(args):
+    pid = proxy_pid()
+    snap = proxy_answers(args.port) if pid else None
+    print(f"process : {'running (pid %d)' % pid if pid else 'stopped'}"
+          + ("  [service]" if service_loaded() else ""))
+    if snap:
+        print(f"strategy: {snap.get('mode', '?')}")
+        print(f"serving : {snap.get('active') or '- (no requests yet)'}")
+        for c in snap["accounts"]:
+            w5, w7 = c["window_5h"], c["window_7d"]
+            quota = (f"5h {w5['pct']:.0f}% - weekly {w7['pct']:.0f}%"
+                     if w5["pct"] is not None else "no quota data")
+            print(f"  {c['alias']:8} {quota:30} {c['requests_']} requests")
+    print(f"panel   : http://127.0.0.1:{args.port}/_status")
+
+
+def cmd_service(args):
+    if args.action == "status":
+        print(f"service : {'installed' if service_loaded() else 'not installed'}")
+        pid = proxy_pid()
+        print(f"process : {'running (pid %d)' % pid if pid else 'stopped'}")
+        return
+
+    if args.action == "uninstall":
+        if IS_MAC:
+            subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", PLIST],
+                           capture_output=True)
+            if os.path.exists(PLIST):
+                os.unlink(PLIST)
+        else:
+            subprocess.run(["systemctl", "--user", "disable", "--now", "clauxy"],
+                           capture_output=True)
+            if os.path.exists(SYSTEMD):
+                os.unlink(SYSTEMD)
+        print("service removed")
+        return
+
+    cmd_stop(args)      # a hand-started proxy would hold the port
+    os.makedirs(HOME, exist_ok=True)
+
+    if IS_MAC:
+        # Full path to python3: launchd's PATH resolves `python3` to an old
+        # system build that cannot parse modern syntax. The project must also
+        # live on a local disk - background jobs get "Operation not permitted"
+        # on external volumes (TCC).
+        plist = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{SERVICE}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{sys.executable}</string><string>-u</string>
+        <string>{PROXY}</string>
+        <string>--port</string><string>{args.port}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{LOGFILE}</string>
+    <key>StandardErrorPath</key><string>{LOGFILE}</string>
+</dict>
+</plist>
+"""
+        os.makedirs(os.path.dirname(PLIST), exist_ok=True)
+        with open(PLIST, "w") as fh:
+            fh.write(plist)
+        subprocess.run(["launchctl", "bootout", f"gui/{os.getuid()}", PLIST],
+                       capture_output=True)
+        up = subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", PLIST],
+                            capture_output=True, text=True)
+        if up.returncode != 0:
+            sys.exit(f"launchctl refused it: {up.stderr.strip()[:200]}")
+    else:
+        unit = f"""[Unit]
+Description=clauxy proxy
+After=network.target
+
+[Service]
+ExecStart={sys.executable} -u {PROXY} --port {args.port}
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
+"""
+        os.makedirs(os.path.dirname(SYSTEMD), exist_ok=True)
+        with open(SYSTEMD, "w") as fh:
+            fh.write(unit)
+        subprocess.run(["systemctl", "--user", "daemon-reload"])
+        up = subprocess.run(["systemctl", "--user", "enable", "--now", "clauxy"],
+                            capture_output=True, text=True)
+        if up.returncode != 0:
+            sys.exit(f"systemctl refused it: {up.stderr.strip()[:200]}")
+
+    if proxy_answers(args.port, tries=25):
+        print("service installed - starts on login, restarts on crash")
+        print(f"  PANEL     http://127.0.0.1:{args.port}/_status")
+        print(f"  ENDPOINT  http://127.0.0.1:{args.port}")
+    else:
+        print(f"installed but did not answer. See {LOGFILE}")
+
+
+def cmd_check(args):
+    os.execv(sys.executable, [sys.executable, PROXY, "--check"])
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="clauxy",
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="\n".join(__doc__.splitlines()[2:]))
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("add", help="register an account")
+    p.add_argument("alias")
+    p.add_argument("--keychain", action="store_true",
+                   help="store the token in the macOS Keychain instead of a file")
+    p.set_defaults(func=cmd_add)
+
+    p = sub.add_parser("list", help="accounts and labels")
+    p.set_defaults(func=cmd_list)
+
+    p = sub.add_parser("label", help="name an account in the panel")
+    p.add_argument("alias", nargs="?")
+    p.add_argument("label", nargs="?")
+    p.set_defaults(func=cmd_label)
+
+    p = sub.add_parser("remove", help="forget an account")
+    p.add_argument("alias")
+    p.set_defaults(func=cmd_remove)
+
+    p = sub.add_parser("login", help="optional sign-in so idle accounts show quota")
+    p.add_argument("alias")
+    p.set_defaults(func=cmd_login)
+
+    for name, fn, helptext in (("start", cmd_start, "run the proxy"),
+                               ("stop", cmd_stop, "stop the proxy"),
+                               ("status", cmd_status, "is it up? which account serves?")):
+        p = sub.add_parser(name, help=helptext)
+        p.add_argument("--port", type=int, default=4000)
+        p.set_defaults(func=fn)
+
+    p = sub.add_parser("service", help="run on login, restart on crash")
+    p.add_argument("action", choices=["install", "uninstall", "status"])
+    p.add_argument("--port", type=int, default=4000)
+    p.set_defaults(func=cmd_service)
+
+    p = sub.add_parser("check", help="try every account with the real Claude CLI")
+    p.set_defaults(func=cmd_check)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

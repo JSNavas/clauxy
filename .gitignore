@@ -1,0 +1,9 @@
+# Credentials and runtime state never belong in the repo.
+tokens/
+*.token
+config.json
+state.json
+*.log
+__pycache__/
+*.pyc
+.venv/
