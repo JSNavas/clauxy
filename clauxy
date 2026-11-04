@@ -43,7 +43,10 @@ KEYCHAIN_PREFIX = "clauxy-account-"
 SERVICE = "com.clauxy.proxy"
 PLIST = os.path.expanduser(f"~/Library/LaunchAgents/{SERVICE}.plist")
 SYSTEMD = os.path.expanduser("~/.config/systemd/user/clauxy.service")
-PROXY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clauxy_proxy.py")
+# realpath, not abspath: the README tells people to symlink this onto their
+# PATH, and abspath would look for the proxy next to the *link* instead of
+# next to the checkout. The service then started and died in a loop.
+PROXY = os.path.join(os.path.dirname(os.path.realpath(__file__)), "clauxy_proxy.py")
 
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{20,}")
 IS_MAC = sys.platform == "darwin"

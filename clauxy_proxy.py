@@ -59,6 +59,7 @@ DEFAULT_COOLDOWN = 300        # si la respuesta no trae `retry-after`
 MAX_COOLDOWN = 8 * 24 * 3600  # tope. Alto a proposito: el limite SEMANAL puede
                               # be more than 24 h away, and a short cap makes the
                               # panel promise a comeback that will not happen.
+LOG_PAGE = 15                 # rows per page in the request log
 AUDIT_MAX = 500           # requests kept in the in-memory log
 
 # Switch thresholds, as a % of each window. We move BEFORE hitting the wall:
@@ -369,6 +370,17 @@ class Account:
                 and self._pct("seven_day") < THRESHOLD_7D)
 
     @property
+    def quota_known(self):
+        """True when telemetry has actually told us something.
+
+        Not knowing is not the same as having quota. Claiming "available" for
+        an account we have never heard from is how work gets sent to a drained
+        subscription.
+        """
+        return any((self.quota or {}).get(w, {}).get("utilization") is not None
+                   for w in ("five_hour", "seven_day"))
+
+    @property
     def out_of_quota(self):
         """Out of quota in either window, according to telemetry."""
         for which in ("five_hour", "seven_day"):
@@ -460,6 +472,7 @@ class Account:
             "available_": self.available,
             "paused_": self.paused,
             "out_of_quota": self.out_of_quota,
+            "quota_known": self.quota_known,
             "usable": self.usable,
             "waiting_s": self.cooling_for,
             "requests_": self.requests,
@@ -829,6 +842,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        # The browser asks for this the moment you open the panel. Forwarding
+        # it upstream earned a 404 per page load and filled the request log.
+        if self.path == "/favicon.ico":
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path in ("/_status", "/_status.json"):
             self._panel(self.path.endswith(".json"))
             return
@@ -1021,14 +1041,22 @@ def thousands(n):
 
 
 def reset_label(window):
-    """'· resets in 4h 47m', or nothing when there is no pending reset.
+    """'· resets at 10:12 PM', in the viewer's own clock.
+
+    The headline above already says how long is left, so repeating the
+    countdown here wastes the line. A wall-clock time answers the question you
+    actually have: can I still get work in before it resets?
 
     A window with no usage carries no `resets_at`: there is nothing to reset.
-    Printing 'resets in --' there looks like missing data, and it is not.
+    Printing 'resets at --' there looks like missing data, and it is not.
     """
     if not window.get("in_s"):
         return "· unused" if not window.get("pct") else ""
-    return f"· resets in {clock(window['in_s'])}"
+    when = datetime.now().astimezone() + timedelta(seconds=window["in_s"])
+    hora = when.strftime("%I:%M %p").lstrip("0")
+    if when.date() != datetime.now().astimezone().date():
+        return f"· resets {when.strftime('%b %-d')}, {hora}"
+    return f"· resets at {hora}"
 
 
 def bar(pct, label, extra="", empty="no data"):
@@ -1056,7 +1084,12 @@ def render_panel(snap):
     total = len(snap["accounts"])
     drained = sum(1 for c in snap["accounts"] if c["waiting_s"] or c.get("out_of_quota"))
     paused = sum(1 for c in snap["accounts"] if c["paused_"])
-    parts = [f"{total - drained - paused} with quota"]
+    unknown = sum(1 for c in snap["accounts"]
+                  if not c.get("quota_known") and not c["waiting_s"]
+                  and not c["paused_"] and not c.get("out_of_quota"))
+    parts = [f"{total - drained - paused - unknown} with quota"]
+    if unknown:
+        parts.append(f"{unknown} unknown")
     if drained:
         parts.append(f"{drained} drained")
     if paused:
@@ -1080,6 +1113,8 @@ def render_panel(snap):
             state, cls = "WEEKLY LIMIT REACHED", "wait"
         elif c["waiting_s"] or (w5["pct"] or 0) >= 100:
             state, cls = "DRAINED", "wait"
+        elif not c.get("quota_known"):
+            state, cls = "QUOTA UNKNOWN", "idle"
         elif is_active:
             state, cls = "IN USE", "on"
         else:
@@ -1099,6 +1134,11 @@ def render_panel(snap):
             headline = (f'<div class="reset">5-hour window at '
                         f'<b>{w5["pct"]:.0f}%</b>, resets in '
                         f'<b>{clock(w5["in_s"])}</b></div>')
+        elif not c.get("quota_known"):
+            headline = ('<div class="reset unknown">Quota not known yet'
+                        '<small>No telemetry for this account yet. It stays in '
+                        'the rotation, so it will be tried - and may turn out '
+                        'to be drained.</small></div>')
         else:
             headline = '<div class="reset ok">Quota available</div>'
 
@@ -1263,6 +1303,8 @@ tr.err td{{background:color-mix(in srgb,var(--err) 7%,transparent)}}
 td{{font-variant-numeric:tabular-nums}}
 .none{{color:var(--mut);padding:18px 11px}}
 .note{{color:var(--mut);font-size:11.5px;margin-top:18px;line-height:1.6}}
+.pager{{display:flex;gap:10px;align-items:center;justify-content:flex-end;
+margin-top:10px;color:var(--mut);font-size:12px;font-variant-numeric:tabular-nums}}
 .note b{{color:var(--fg)}}
 .btn-cmds{{font-size:11px;padding:3px 10px;margin-left:8px;vertical-align:3px;
 border:1px solid var(--line);background:var(--card);color:var(--mut);border-radius:999px;cursor:pointer}}
@@ -1293,6 +1335,7 @@ border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:14px 0 6p
 .reset.wait{{background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--warn)}}
 .reset.wait b{{color:var(--warn)}}
 .reset.ok{{color:var(--ok)}}
+.reset.unknown{{color:var(--mut)}}
 .reset small{{display:block;color:var(--mut);font-size:11px;margin-top:3px}}
 </style>
 <div class=top>
@@ -1317,11 +1360,42 @@ border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:14px 0 6p
 {switches_html}
 
 <h3>Request log</h3>
-<table>
+<table id="log">
 <tr><th>Time</th><th>Model</th><th>Account</th><th>Status</th>
     <th>Tokens (in · cache r · cache w / out)</th><th>Cost</th><th>Took</th></tr>
 {"".join(rows) or '<tr><td colspan=7 class=none>No requests yet.</td></tr>'}
 </table>
+<div class=pager id="pager"></div>
+<script>
+(function () {{
+  // The snapshot carries more rows than fit on screen. Paging them here keeps
+  // the page short without a round trip, and survives the 10 s auto-refresh
+  // because the page simply starts on the first page again.
+  var PER = {LOG_PAGE};
+  var rows = Array.from(document.querySelectorAll('#log tr')).slice(1)
+                  .filter(function (r) {{ return !r.querySelector('.none'); }});
+  var pager = document.getElementById('pager');
+  if (rows.length <= PER) {{ return; }}
+  var pages = Math.ceil(rows.length / PER), page = 0;
+  function draw() {{
+    rows.forEach(function (r, i) {{
+      r.style.display = (i >= page * PER && i < (page + 1) * PER) ? '' : 'none';
+    }});
+    pager.innerHTML = '';
+    var prev = document.createElement('button');
+    prev.textContent = '‹ newer'; prev.disabled = page === 0;
+    prev.onclick = function () {{ page--; draw(); }};
+    var next = document.createElement('button');
+    next.textContent = 'older ›'; next.disabled = page >= pages - 1;
+    next.onclick = function () {{ page++; draw(); }};
+    var label = document.createElement('span');
+    label.textContent = (page * PER + 1) + '-' +
+      Math.min((page + 1) * PER, rows.length) + ' of ' + rows.length;
+    pager.appendChild(prev); pager.appendChild(label); pager.appendChild(next);
+  }}
+  draw();
+}})();
+</script>
 
 <p class=note><b>Spend is indicative.</b> On a subscription you do not pay per
 token: this is what the same traffic would cost at public API prices, useful to

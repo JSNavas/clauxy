@@ -47,3 +47,26 @@ def test_an_unused_window_says_so_instead_of_dashes():
     """No usage means no reset time; 'resets in --' looks like missing data."""
     assert "unused" in proxy.reset_label({"pct": 0, "in_s": None})
     assert proxy.reset_label({"pct": 40, "in_s": None}) == ""
+
+
+def test_never_claims_quota_it_does_not_know_about():
+    """An account with no telemetry is not an account with quota.
+
+    Saying 'Quota available' for one we have never heard from is how work
+    gets sent to a drained subscription.
+    """
+    blank = account("blank")
+    blank.quota = {}
+    html = proxy.render_panel(pool(blank).snapshot())
+    assert "Quota available" not in html
+    assert "Quota not known yet" in html
+    assert "QUOTA UNKNOWN" in html
+
+
+def test_header_counts_unknown_apart_from_with_quota():
+    good = account("good", util_5h=10, util_7d=10)
+    blank = account("blank")
+    blank.quota = {}
+    html = proxy.render_panel(pool(good, blank).snapshot())
+    _, summary = _header_count(html)
+    assert "1 with quota" in summary and "1 unknown" in summary
