@@ -225,6 +225,10 @@ def save_state(pool):
                 "cooling_until": a.cooling_until,
                 "limit_text": a.limit_text,
                 "last_status": a.last_status,
+                # Quota too: without it the bars go blank after every restart
+                # and stay blank until that account serves something.
+                "quota": a.quota,
+                "limits": a.limits,
             }
             for a in pool.accounts
         },
@@ -261,6 +265,8 @@ def load_state(pool):
         account.cooling_until = saved.get("cooling_until", 0.0)
         account.limit_text = saved.get("limit_text")
         account.last_status = saved.get("last_status")
+        account.quota = saved.get("quota") or {}
+        account.limits = saved.get("limits") or {}
     return True
 
 

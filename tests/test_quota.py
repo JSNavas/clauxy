@@ -54,3 +54,30 @@ def test_real_quota_429_carries_a_reason():
     # The error *type* contains "limit", so only the message may be inspected.
     assert proxy.is_quota_429(
         '{"error":{"type":"rate_limit_error","message":"You hit your 5-hour limit"}}')
+
+
+def test_quota_survives_a_restart(tmp=None):
+    """Counters used to persist but quota did not, so the bars went blank
+    after every restart until that account served again."""
+    import json
+    import os
+    import tempfile
+
+    from helpers import account, pool
+
+    a = account("a", util_5h=42, util_7d=17)
+    p = pool(a)
+    a.requests = 7
+
+    with tempfile.TemporaryDirectory() as d:
+        proxy.STATE_FILE = os.path.join(d, "state.json")
+        proxy.save_state(p)
+        assert json.load(open(proxy.STATE_FILE))["accounts"]["a"]["quota"]
+
+        fresh = account("a")          # a brand new process
+        fresh.quota = {}
+        p2 = pool(fresh)
+        assert proxy.load_state(p2)
+        assert fresh.requests == 7
+        assert fresh.window("five_hour")[0] == 42
+        assert fresh.window("seven_day")[0] == 17

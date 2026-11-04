@@ -44,6 +44,30 @@ PROXY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "clauxy_proxy.p
 TOKEN_RE = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{20,}")
 IS_MAC = sys.platform == "darwin"
 
+VERSION = "0.1.0"
+BANNER = r"""
+       _
+  ___ | |  __ _  _   _ __  __ _   _
+ / __|| | / _` || | | |\ \/ /| | | |
+| (__ | || (_| || |_| | >  < | |_| |
+ \___||_| \__,_| \__,_|/_/\_\ \__, |
+                              |___/
+"""
+
+
+def banner(subtitle=""):
+    """Prints the mark once, on the commands people actually watch.
+
+    Skipped when the output is piped: a banner in the middle of someone's
+    `grep` is noise, not branding. NO_COLOR and CLAUXY_NO_BANNER turn it off.
+    """
+    if os.environ.get("CLAUXY_NO_BANNER") or not sys.stdout.isatty():
+        return
+    dim, reset = ("\033[2m", "\033[0m") if not os.environ.get("NO_COLOR") else ("", "")
+    print(BANNER.rstrip("\n"))
+    print(f"{dim}  one endpoint, many Claude subscriptions"
+          f"{' · ' + subtitle if subtitle else ''}   v{VERSION}{reset}\n")
+
 
 def token_path(alias):
     return os.path.join(TOKENS, f"{alias}.token")
@@ -171,6 +195,7 @@ def token_works(token, cfg):
 
 
 def cmd_add(args):
+    banner("adding an account")
     cfg = os.path.join(SESSIONS, args.alias)
     os.makedirs(cfg, exist_ok=True)
     print(f"Isolated config dir: {cfg}")
@@ -370,6 +395,7 @@ def proxy_answers(port, tries=1):
 
 
 def cmd_start(args):
+    banner('starting')
     if proxy_pid():
         print("already running")
         return
@@ -413,6 +439,7 @@ def cmd_stop(args):
 
 
 def cmd_status(args):
+    banner('')
     pid = proxy_pid()
     snap = proxy_answers(args.port) if pid else None
     print(f"process : {'running (pid %d)' % pid if pid else 'stopped'}"
@@ -449,6 +476,7 @@ def cmd_service(args):
         print("service removed")
         return
 
+    banner("installing service")
     cmd_stop(args)      # a hand-started proxy would hold the port
     os.makedirs(HOME, exist_ok=True)
 
@@ -525,6 +553,8 @@ def main():
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="\n".join(__doc__.splitlines()[2:]))
+    parser.add_argument("--version", action="version",
+                        version=f"clauxy {VERSION}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("add", help="register an account")
