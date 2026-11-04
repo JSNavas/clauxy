@@ -44,6 +44,15 @@ cd clauxy
 ./clauxy add acct-1      # repeat per subscription
 ```
 
+To call it from anywhere, link it onto your PATH:
+
+```bash
+ln -s "$PWD/clauxy" ~/.local/bin/clauxy    # or /usr/local/bin
+clauxy status
+```
+
+It is a symlink to the checkout, so `git pull` is the whole upgrade.
+
 `add` opens a browser sign-in and captures the long-lived token from
 `claude setup-token`. Use a **private window** between accounts, or you will
 register the same one twice.
