@@ -259,6 +259,18 @@ def cmd_add(args):
     if label:
         write_label(args.alias, label)
 
+    # Without a session credential this account shows "quota unknown" until it
+    # serves something - and an account you believe is fresh may be drained.
+    # Offering it here is the difference between a panel that informs and one
+    # that guesses.
+    print("\nQuota for this account will show up once it serves a request.")
+    print("A regular sign-in makes it visible right away, and warns you if the")
+    print("account is already drained. It is read-only and optional.")
+    if input("Sign in now? [y/N]: ").strip().lower().startswith("y"):
+        cmd_login(args)
+    else:
+        print(f"Skipped. You can do it later: clauxy login {args.alias}")
+
 
 def cmd_list(args):
     labels = read_labels()
@@ -317,16 +329,22 @@ def session_credential(alias):
         pass
     if not IS_MAC:
         return None
-    suffix = hashlib.sha256(folder.encode()).hexdigest()[:8]
-    out = subprocess.run(["security", "find-generic-password",
-                          "-s", f"Claude Code-credentials-{suffix}", "-w"],
-                         capture_output=True, text=True)
-    if out.returncode != 0:
-        return None
-    try:
-        return json.loads(out.stdout.strip()).get("claudeAiOauth") or None
-    except ValueError:
-        return None
+    # Literal path and realpath: the Keychain entry is keyed by the folder
+    # path, so a symlinked session dir is only found through its target.
+    for candidate in dict.fromkeys((folder, os.path.realpath(folder))):
+        suffix = hashlib.sha256(candidate.encode()).hexdigest()[:8]
+        out = subprocess.run(["security", "find-generic-password",
+                              "-s", f"Claude Code-credentials-{suffix}", "-w"],
+                             capture_output=True, text=True)
+        if out.returncode != 0:
+            continue
+        try:
+            oauth = json.loads(out.stdout.strip()).get("claudeAiOauth")
+        except ValueError:
+            continue
+        if oauth:
+            return oauth
+    return None
 
 
 def cmd_login(args):

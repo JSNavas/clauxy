@@ -193,18 +193,25 @@ def session_credential(alias):
     never touched.
     """
     folder = os.path.join(HOME, "sessions", alias)
-    suffix = hashlib.sha256(folder.encode()).hexdigest()[:8]
-    out = subprocess.run(
-        ["security", "find-generic-password",
-         "-s", f"Claude Code-credentials-{suffix}", "-w"],
-        capture_output=True, text=True,
-    )
-    if out.returncode != 0:
-        return None
-    try:
-        return json.loads(out.stdout.strip()).get("claudeAiOauth") or None
-    except ValueError:
-        return None
+    # Literal path and realpath: the Keychain entry is keyed by the folder
+    # path, so a session dir symlinked in from elsewhere is only found through
+    # its target. That is how an existing sign-in can be reused.
+    for candidate in dict.fromkeys((folder, os.path.realpath(folder))):
+        suffix = hashlib.sha256(candidate.encode()).hexdigest()[:8]
+        out = subprocess.run(
+            ["security", "find-generic-password",
+             "-s", f"Claude Code-credentials-{suffix}", "-w"],
+            capture_output=True, text=True,
+        )
+        if out.returncode != 0:
+            continue
+        try:
+            oauth = json.loads(out.stdout.strip()).get("claudeAiOauth")
+        except ValueError:
+            continue
+        if oauth:
+            return oauth
+    return None
 
 
 def save_state(pool):
@@ -257,6 +264,12 @@ def load_state(pool):
         return False
     pool.failovers = data.get("failovers", 0)
     for entry in reversed(data.get("audit", [])):
+        # Records from before favicon requests were answered locally: they
+        # were never real traffic and only clutter the log.
+        if entry.get("path") == "/favicon.ico" or (
+                entry.get("status") == 404 and entry.get("model") is None
+                and not entry.get("path")):
+            continue
         pool.audit.appendleft(entry)
     for account in pool.accounts:
         saved = (data.get("accounts") or {}).get(account.alias)
@@ -557,7 +570,7 @@ class Pool:
         every request, only when there is a clear reason.
         """
         if current is None:
-            return "arranque"
+            return "startup"
         if best is current:
             return None
         if not current.available:

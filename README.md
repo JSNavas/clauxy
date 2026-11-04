@@ -154,12 +154,28 @@ clauxy login <alias>          optional, see below
 
 Quota arrives free in the `anthropic-ratelimit-unified-*` headers of every
 response — no extra request, no credential that expires. But an account that
-has not served anything yet has no headers, so it shows as unknown. That is a
-trap: an account you think is fresh may be exhausted.
+has not served anything yet has no headers, so the panel says **"quota not
+known yet"**. It never claims an unknown account has quota: one you believe is
+fresh may be fully drained.
 
-`clauxy login <alias>` adds a regular sign-in, in an isolated config dir, that
-lets clauxy query quota directly. Requests keep using the long-lived token; the
-session credential is only ever read.
+`clauxy add` offers to fix that on the spot, and you can always do it later:
+
+```bash
+clauxy login <alias>
+```
+
+It is a regular sign-in in that account's isolated config dir, used **only to
+read quota**. Requests keep going out with the long-lived token.
+
+### Reusing a sign-in you already have
+
+On macOS the credential lives in the Keychain, keyed by the **path** of the
+config dir — so copying the folder does not bring it along. clauxy looks up
+both the literal path and its realpath, which means a symlink works:
+
+```bash
+ln -s ~/somewhere/else/acct-1 ~/.clauxy/sessions/acct-1
+```
 
 ## Configuration
 
