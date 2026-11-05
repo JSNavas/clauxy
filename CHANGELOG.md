@@ -6,7 +6,31 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Sign-ins **renew themselves**. The session token expires in hours, the
+  refresh token lasts weeks, and only the Claude CLI is allowed to trade one
+  for the other — so clauxy asks it to: a throwaway prompt against that
+  account's config dir, with `ANTHROPIC_*` scrubbed so it does not come back
+  through the proxy. A drained account renews too; the limit message arrives
+  after the renewal. At most one attempt per account every 10 minutes.
+
 ### Fixed
+
+- Quota **froze at its last reading**. With the sign-in expired there was no
+  telemetry, and the panel kept showing a percentage from a window that had
+  already reset — including accounts stuck at 100% whose limit had lifted.
+  An expired reading now reads "unknown since it reset" instead of 0%, which
+  claimed an empty window nobody had measured.
+- `probe_quota` reported the result of the **last** call it made, so a
+  `/profile` that would not answer printed "quota unknown" over quota it had
+  just read correctly. Only the usage call decides that message now, and an
+  expired sign-in says so instead of hiding behind it.
+- Reset times **wobbled by a minute** between page refreshes, and showed the
+  wrong hour: they were rebuilt from a whole-second countdown, and the resets
+  land on 12:59:59. Taken from the reset itself and rounded to the minute.
+- `clauxy status` printed "no quota data" when only one of the two windows
+  had aged out, hiding the one that was still good. Each window stands alone.
 
 - The service looked for the proxy next to the **symlink** instead of the
   checkout, so installing it from a `PATH` link started a process that died in

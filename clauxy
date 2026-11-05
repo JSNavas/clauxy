@@ -492,8 +492,12 @@ def cmd_status(args):
         print(f"serving : {snap.get('active') or '- (no requests yet)'}")
         for c in snap["accounts"]:
             w5, w7 = c["window_5h"], c["window_7d"]
-            quota = (f"5h {w5['pct']:.0f}% - weekly {w7['pct']:.0f}%"
-                     if w5["pct"] is not None else "no quota data")
+            # Each window stands on its own: a 5-hour reading that has aged
+            # out says nothing about the weekly one, which may still be live.
+            shown = [f"{name} {w['pct']:.0f}%"
+                     for name, w in (("5h", w5), ("weekly", w7))
+                     if w["pct"] is not None]
+            quota = " - ".join(shown) if shown else "no quota data"
             print(f"  {c['alias']:8} {quota:30} {c['requests_']} requests")
     print(f"panel   : http://127.0.0.1:{args.port}/_status")
 

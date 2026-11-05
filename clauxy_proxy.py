@@ -19,12 +19,15 @@ import gzip
 import hashlib
 import http.server
 import json
+import math
 import os
 import re
+import shutil
 import signal
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
@@ -42,6 +45,7 @@ UPSTREAM = os.environ.get("CLAUXY_UPSTREAM", "https://api.anthropic.com")
 HOME = os.path.expanduser(os.environ.get("CLAUXY_HOME", "~/.clauxy"))
 TOKENS = os.path.join(HOME, "tokens")
 KEYCHAIN_PREFIX = "clauxy-account-"
+RENEW_EVERY = 600          # seconds between attempts to renew a sign-in
 
 # Hop-by-hop headers: they belong to the connection, not the message, or we
 # rewrite them ourselves.
@@ -214,6 +218,62 @@ def session_credential(alias):
     return None
 
 
+def claude_cli():
+    """Where the Claude CLI lives, for a service with a bare PATH.
+
+    launchd gives the daemon almost no PATH, so `which` alone finds nothing
+    and the renewal below would look broken on exactly the machines it is
+    meant to run on.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    for guess in ("/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+                  os.path.expanduser("~/.claude/local/claude"),
+                  os.path.expanduser("~/.local/bin/claude")):
+        if os.path.isfile(guess) and os.access(guess, os.X_OK):
+            return guess
+    return None
+
+
+def renew_session(alias):
+    """Renews an expired sign-in by letting the Claude CLI do it.
+
+    The session token lasts hours and the refresh token weeks, so the sign-in
+    does not really need repeating — something just has to spend the refresh
+    token before it lapses. Anthropic's token endpoint refuses callers that
+    are not the CLI, so clauxy asks the CLI: one throwaway prompt against that
+    account's config dir, which makes it notice the expiry, renew, and write
+    the new pair back to the Keychain, where probe_quota reads it. The prompt
+    itself may well fail — a drained account answers with its limit — and
+    that is fine: the renewal happens before the answer does.
+
+    The environment is scrubbed of ANTHROPIC_* on purpose: inherited from the
+    proxy they would send this through clauxy itself, which serves it with the
+    long-lived work token and renews nothing.
+    """
+    binary = claude_cli()
+    # Realpath, like session_credential: the Keychain entry is keyed by the
+    # folder the CLI resolves to, and handed the symlink it reports "not
+    # logged in" and renews nothing.
+    folder = os.path.realpath(os.path.join(HOME, "sessions", alias))
+    if not binary or not os.path.isdir(folder):
+        return None
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))}
+    env["CLAUDE_CONFIG_DIR"] = folder
+    try:
+        subprocess.run([binary, "-p", "ping", "--model", "haiku"],
+                       env=env, cwd=tempfile.gettempdir(),
+                       capture_output=True, text=True, timeout=180)
+    except Exception:
+        return None
+    oauth = session_credential(alias)
+    if oauth and (oauth.get("expiresAt") or 0) / 1000 > time.time():
+        return oauth
+    return None
+
+
 def save_state(pool):
     """Flushes counters, holds and the request log to disk.
 
@@ -359,6 +419,8 @@ class Account:
         self.plan = None
         self.quota = {}            # de /api/oauth/usage
         self.quota_error = None
+        self.session_expired = False
+        self.renew_tried = 0.0     # last attempt to renew the sign-in
         self.limit_text = None   # the last 429's message, if any
 
     def anota(self, model_, usage):
@@ -390,8 +452,23 @@ class Account:
         an account we have never heard from is how work gets sent to a drained
         subscription.
         """
-        return any((self.quota or {}).get(w, {}).get("utilization") is not None
+        return any(self.window(w)[0] is not None
                    for w in ("five_hour", "seven_day"))
+
+    def window_stale(self, which):
+        """True when the last reading describes a window that already ended.
+
+        Telling this apart from "never heard anything" is what stops the
+        panel from greeting a busy account with "shows once it is used".
+        """
+        block = (self.quota or {}).get(which) or {}
+        if block.get("utilization") is None or not block.get("resets_at"):
+            return False
+        try:
+            reset = datetime.fromisoformat(block["resets_at"])
+        except ValueError:
+            return False
+        return reset <= datetime.now(timezone.utc)
 
     @property
     def out_of_quota(self):
@@ -420,10 +497,34 @@ class Account:
         if block.get("resets_at"):
             try:
                 reset = datetime.fromisoformat(block["resets_at"])
-                in_s = max(0, int((reset - datetime.now(timezone.utc)).total_seconds()))
+                in_s = math.ceil(
+                    (reset - datetime.now(timezone.utc)).total_seconds())
             except ValueError:
                 pass
+        if in_s is not None and in_s <= 0:
+            # The window this reading describes has already rolled over, so
+            # the percentage is history: it froze accounts at 100% and showed
+            # a limit that had already lifted. What replaced it is not known
+            # either — the account keeps being used outside this proxy — so
+            # the honest answer is "no idea", not "empty".
+            return None, None, None
+
         return pct, in_s, block.get("locked_reason")
+
+    def reset_at(self, which):
+        """The reset as an absolute epoch, for display.
+
+        Rebuilding it from the countdown made the minute wobble between page
+        refreshes: the countdown is whole seconds, so now + in_s lands either
+        side of the true reset.
+        """
+        block = (self.quota or {}).get(which) or {}
+        if self.window(which)[1] is None or not block.get("resets_at"):
+            return None
+        try:
+            return datetime.fromisoformat(block["resets_at"]).timestamp()
+        except ValueError:
+            return None
 
     def session_token(self):
         """The token from a regular login, if this folder has one.
@@ -437,13 +538,25 @@ class Account:
         if not oauth:
             return None
         if (oauth.get("expiresAt") or 0) / 1000 <= time.time():
-            self.quota_error = "sesion caducada"
-            return None
+            # Expired is not signed out: the refresh token is still good for
+            # weeks. Spend it, at most once every few minutes so a CLI that
+            # cannot fix it is not run on every probe.
+            if time.time() - self.renew_tried < RENEW_EVERY:
+                self.session_expired = True
+                return None
+            self.renew_tried = time.time()
+            oauth = renew_session(self.alias)
+            if not oauth:
+                self.session_expired = True
+                return None
+        self.session_expired = False
         return oauth.get("accessToken")
 
     def probe_quota(self):
         """Asks Anthropic how much this account has left. Costs no quota."""
+        self.session_expired = False
         credential = self.session_token() or self.token
+        error = None
         for path_, target in (("/api/oauth/usage", "quota"),
                               ("/api/oauth/profile", "perfil")):
             req = urllib.request.Request(UPSTREAM + path_)
@@ -455,13 +568,19 @@ class Account:
             except urllib.error.HTTPError as exc:
                 # Not an error: a work token simply cannot read telemetry.
                 # Say what to do about it instead of flashing a failure.
-                self.quota_error = (f"quota unknown - run: clauxy login {self.alias}"
-                                    if exc.code == 403 else f"HTTP {exc.code}")
+                if target == "quota":
+                    # A sign-in that has lapsed and a work token that was
+                    # never allowed to read telemetry look identical here;
+                    # only the first one is news, so name it.
+                    error = (f"session expired - run: clauxy login {self.alias}"
+                             if self.session_expired else
+                             f"quota unknown - run: clauxy login {self.alias}"
+                             if exc.code in (401, 403) else f"HTTP {exc.code}")
                 continue
             except Exception as exc:
-                self.quota_error = f"{type(exc).__name__}"
+                if target == "quota":
+                    error = f"{type(exc).__name__}"
                 continue
-            self.quota_error = None
             if target == "quota":
                 self.quota = item
             else:
@@ -469,6 +588,9 @@ class Account:
                 self.email = who.get("email")
                 self.plan = ("max" if who.get("has_claude_max")
                              else "pro" if who.get("has_claude_pro") else "?")
+        # Only the usage call decides this: a profile that will not answer
+        # says nothing about whether the quota numbers on screen are real.
+        self.quota_error = error
 
     @property
     def cooling_for(self):
@@ -496,8 +618,12 @@ class Account:
             "usd": round(self.usd, 4),
             "email": self.email or LABELS.get(self.alias),
             "plan": self.plan,
-            "window_5h": dict(zip(("pct", "in_s", "locked"), self.window("five_hour"))),
-            "window_7d": dict(zip(("pct", "in_s", "locked"), self.window("seven_day"))),
+            "window_5h": dict(zip(("pct", "in_s", "locked"), self.window("five_hour")),
+                              stale=self.window_stale("five_hour"),
+                              at=self.reset_at("five_hour")),
+            "window_7d": dict(zip(("pct", "in_s", "locked"), self.window("seven_day")),
+                              stale=self.window_stale("seven_day"),
+                              at=self.reset_at("seven_day")),
             "quota_error_": self.quota_error,
             "limit_text": self.limit_text,
         }
@@ -1065,11 +1191,30 @@ def reset_label(window):
     """
     if not window.get("in_s"):
         return "· unused" if not window.get("pct") else ""
-    when = datetime.now().astimezone() + timedelta(seconds=window["in_s"])
+    when = (datetime.fromtimestamp(window["at"]).astimezone()
+            if window.get("at") else
+            datetime.now().astimezone() + timedelta(seconds=window["in_s"]))
+    # These resets land on 12:59:59, a second short of the round hour.
+    # Truncating the seconds away printed "12:59", which reads as the wrong
+    # hour; rounding to the nearest minute prints the hour people expect.
+    when = (when + timedelta(seconds=30)).replace(second=0, microsecond=0)
     hora = when.strftime("%I:%M %p").lstrip("0")
     if when.date() != datetime.now().astimezone().date():
         return f"· resets {when.strftime('%b %-d')}, {hora}"
     return f"· resets at {hora}"
+
+
+def empty_label(window, no_telemetry):
+    """What to write where the percentage would go, when there is none.
+
+    "Shows once it is used" is only true of an account nobody has touched.
+    Saying it about one whose window just rolled over reads as 0%, which is a
+    claim the proxy cannot make: the account is being spent, the reading it
+    had has expired, and nothing has refreshed it.
+    """
+    if window.get("stale"):
+        return "unknown since it reset"
+    return "shows once it is used" if no_telemetry else "no data"
 
 
 def bar(pct, label, extra="", empty="no data"):
@@ -1126,7 +1271,7 @@ def render_panel(snap):
             state, cls = "WEEKLY LIMIT REACHED", "wait"
         elif c["waiting_s"] or (w5["pct"] or 0) >= 100:
             state, cls = "DRAINED", "wait"
-        elif not c.get("quota_known"):
+        elif not c.get("quota_known") or w5.get("stale") or w7.get("stale"):
             state, cls = "QUOTA UNKNOWN", "idle"
         elif is_active:
             state, cls = "IN USE", "on"
@@ -1147,6 +1292,13 @@ def render_panel(snap):
             headline = (f'<div class="reset">5-hour window at '
                         f'<b>{w5["pct"]:.0f}%</b>, resets in '
                         f'<b>{clock(w5["in_s"])}</b></div>')
+        elif w5.get("stale") or w7.get("stale"):
+            headline = ('<div class="reset unknown">Quota reading has expired'
+                        '<small>A window reset since the last reading, and '
+                        'nothing has refreshed it: the account keeps being '
+                        'spent elsewhere. Send a request through clauxy, or '
+                        f'run <code>clauxy login {c["alias"]}</code>, to read '
+                        'it again.</small></div>')
         elif not c.get("quota_known"):
             headline = ('<div class="reset unknown">Quota not known yet'
                         '<small>No telemetry for this account yet. It stays in '
@@ -1169,10 +1321,8 @@ def render_panel(snap):
 
   {headline}
 
-  {bar(w5['pct'], '5-hour', reset_label(w5),
-       "shows once it is used" if no_telemetry else "no data")}
-  {bar(w7['pct'], 'Weekly', reset_label(w7),
-       "shows once it is used" if no_telemetry else "no data")}
+  {bar(w5['pct'], '5-hour', reset_label(w5), empty_label(w5, no_telemetry))}
+  {bar(w7['pct'], 'Weekly', reset_label(w7), empty_label(w7, no_telemetry))}
 
   <dl>
     <div><dt>Spend</dt><dd class="big">${c['usd']:.4f}</dd></div>
