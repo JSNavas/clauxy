@@ -46,6 +46,16 @@ All notable changes to this project are documented here. The format follows
 - **Spend was printed raw**: `$5.3123`. Totals now read like money (`$5.31`),
   while single requests keep enough digits to stay apart, since rounding
   fractions of a cent to two decimals turns the log into a column of `$0.02`.
+- The quota probe **asked twice as often as it needed to, and again on every
+  restart**. `/api/oauth/profile` was fetched alongside `/api/oauth/usage` on
+  every pass, for an identity that does not change — it is now read once and
+  then at most every six hours. Startup restored the saved state *after*
+  probing, so a reading taken seconds earlier was thrown away and asked for
+  again; a handful of restarts in a row was enough to earn a 429. State loads
+  first now, a reading younger than the probe interval is left alone, and the
+  backoff itself survives a restart instead of being skipped by one. The
+  background probes are also spread across the minute rather than fired
+  together, since bursts are what the endpoint objects to.
 - **`HTTP 429` next to the token counts** read as if the account were drained.
   It was `/api/oauth/usage`, the telemetry endpoint, which rate-limits
   separately from the quota it reports. The message now says what it is and

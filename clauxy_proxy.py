@@ -60,6 +60,8 @@ HOP_BY_HOP = {
 RETRYABLE = {429, 529}
 
 DEFAULT_COOLDOWN = 300        # si la respuesta no trae `retry-after`
+PROBE_EVERY = 60              # how often the background probe asks
+PROFILE_EVERY = 6 * 3600      # identity barely changes; ask for it rarely
 PROBE_BACKOFF_S = 120         # `/api/oauth/usage` rate-limits separately
 MAX_COOLDOWN = 8 * 24 * 3600  # tope. Alto a proposito: el limite SEMANAL puede
                               # be more than 24 h away, and a short cap makes the
@@ -305,6 +307,13 @@ def save_state(pool):
                 # and stay blank until that account serves something.
                 "quota": a.quota,
                 "limits": a.limits,
+                # When it was read, so a restart does not re-ask for something
+                # measured seconds ago, and does not jump a backoff either.
+                "quota_at": a.quota_at,
+                "profile_at": a.profile_at,
+                "probe_blocked_until": a.probe_blocked_until,
+                "email": a.email,
+                "plan": a.plan,
             }
             for a in pool.accounts
         },
@@ -349,6 +358,11 @@ def load_state(pool):
         account.cooling_until = saved.get("cooling_until", 0.0)
         account.limit_text = saved.get("limit_text")
         account.last_status = saved.get("last_status")
+        account.quota_at = saved.get("quota_at", 0.0)
+        account.profile_at = saved.get("profile_at", 0.0)
+        account.probe_blocked_until = saved.get("probe_blocked_until", 0.0)
+        account.email = saved.get("email") or account.email
+        account.plan = saved.get("plan") or account.plan
         account.quota = saved.get("quota") or {}
         account.limits = saved.get("limits") or {}
     return True
@@ -427,6 +441,8 @@ class Account:
         # The usage endpoint rate-limits on its own, separately from the
         # quota it reports. Asking harder after a 429 only extends it.
         self.probe_blocked_until = 0.0
+        self.quota_at = 0.0        # when the reading was taken
+        self.profile_at = 0.0      # identity barely changes; ask for it rarely
         self.quota_error = None
         self.session_expired = False
         self.renew_tried = 0.0     # last attempt to renew the sign-in
@@ -580,8 +596,12 @@ class Account:
         self.session_expired = False
         credential = self.session_token() or self.token
         error = None
-        for path_, target in (("/api/oauth/usage", "quota"),
-                              ("/api/oauth/profile", "perfil")):
+        # The profile never really changes, and asking for it on every probe
+        # doubled the traffic to an endpoint that rate-limits.
+        wanted = [("/api/oauth/usage", "quota")]
+        if not self.email or time.time() - self.profile_at > PROFILE_EVERY:
+            wanted.append(("/api/oauth/profile", "perfil"))
+        for path_, target in wanted:
             req = urllib.request.Request(UPSTREAM + path_)
             req.add_header("Authorization", "Bearer " + credential)
             req.add_header("anthropic-beta", "oauth-2025-04-20")
@@ -619,12 +639,14 @@ class Account:
                 continue
             if target == "quota":
                 self.quota = item
+                self.quota_at = time.time()
                 self.probe_blocked_until = 0.0
             else:
                 who = item.get("account", {})
                 self.email = who.get("email")
                 self.plan = ("max" if who.get("has_claude_max")
                              else "pro" if who.get("has_claude_pro") else "?")
+                self.profile_at = time.time()
         # Only the usage call decides this: a profile that will not answer
         # says nothing about whether the quota numbers on screen are real.
         self.quota_error = error
@@ -1736,19 +1758,28 @@ def save_periodically(pool, every=10):
             save_state(pool)
 
 
-def watch_quotas(pool, every=60):
-    """Probes every account's quota once a minute, in the background."""
+def watch_quotas(pool, every=PROBE_EVERY):
+    """Probes every account's quota once a minute, in the background.
+
+    Spread out across the minute rather than fired together: three accounts
+    asking in the same instant is a burst, and bursts are what the endpoint
+    rate-limits on.
+    """
     while True:
-        for account in list(pool.accounts):
+        accounts = list(pool.accounts) or [None]
+        # One full pass per `every`, not `every` plus a pass: the gaps are
+        # carved out of the interval, not added to it.
+        gap = every / len(accounts)
+        for account in accounts:
+            time.sleep(gap)
             # Backing off is the whole point: hammering the usage endpoint
             # through its own rate limit is what earned the 429.
-            if account.probe_wait:
+            if account is None or account.probe_wait:
                 continue
             try:
                 account.probe_quota()
             except Exception:
                 pass
-        time.sleep(every)
 
 
 def probe(pool, port):
@@ -1853,15 +1884,34 @@ def main():
     if args.probe:
         sys.exit(1 if probe(pool, 0) else 0)
 
-    print("probing each account's quota...")
+    # Restore before probing. A restart used to throw away a reading taken
+    # seconds earlier and ask again, so a handful of restarts in a row was
+    # enough to earn a 429 from an endpoint that rate-limits on its own.
+    restored = load_state(pool)
+
+    stale = [a for a in accounts
+             if time.time() - a.quota_at > PROBE_EVERY and not a.probe_wait]
+    if stale:
+        print("probing each account's quota...")
     for account in accounts:
-        account.probe_quota()
+        if account in stale:
+            account.probe_quota()
         pct, in_s, _ = account.window("five_hour")
+        if account in stale:
+            fresh = ""
+        elif account.probe_wait:
+            # Saying nothing here is how you end up staring at figures that
+            # are not being refreshed and wondering why.
+            fresh = f" (not refreshing for {clock(account.probe_wait)})"
+        elif account.quota_at:
+            fresh = f" (read {clock(int(time.time() - account.quota_at))} ago)"
+        else:
+            fresh = ""
         print(f"  {account.alias:12} {account.email or '?':32} "
-              + (f"5h {pct:.0f}% · resets en {clock(in_s)}"
+              + (f"5h {pct:.0f}% · resets en {clock(in_s)}{fresh}"
                  if pct is not None else f"no quota data ({account.quota_error})"))
 
-    if load_state(pool):
+    if restored:
         done = sum(a.requests for a in accounts)
         waiting = [a.alias for a in accounts if not a.available]
         print(f"  HISTORY   restored: {done} requests"

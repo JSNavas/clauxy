@@ -191,7 +191,14 @@ The **Refresh quota** button and the background probe both go to
 `/api/oauth/usage`, which has a rate limit of its own — separate from the quota
 it reports. If you hit it, the panel says `too many quota checks - retrying in
 …` and stops asking until it clears. That is the telemetry endpoint being busy,
-not the account being drained: the bars already on screen stay valid.
+not the account being drained: the bars already on screen stay valid, and the
+proxy keeps serving normally throughout.
+
+Steady state is one request per account per minute, spread across the minute
+rather than fired together. Readings survive restarts, so restarting does not
+re-ask for something measured seconds ago, and the identity call happens once
+every six hours instead of on every pass. What actually trips the limit is a
+burst — a dozen restarts in a row, or holding down **Refresh quota**.
 
 ### Reusing a sign-in you already have
 

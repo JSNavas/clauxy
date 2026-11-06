@@ -1,5 +1,6 @@
 """Reading quota: response headers, limit messages, and what is not quota."""
 
+import os
 import time
 from datetime import datetime, timedelta
 
@@ -130,3 +131,46 @@ def test_the_backoff_clears_once_it_can_read_again():
     a = account("x")
     a.probe_blocked_until = time.time() - 1
     assert a.probe_wait == 0
+
+
+def test_a_restart_does_not_re_ask_for_a_fresh_reading():
+    """Restarting threw away a reading taken seconds earlier and asked again.
+
+    A handful of restarts in a row was enough to earn a 429 from an endpoint
+    that rate-limits separately from the quota it reports.
+    """
+    a = account("x")
+    a.quota_at = time.time() - 5
+    assert time.time() - a.quota_at < proxy.PROBE_EVERY, "still fresh: do not ask"
+    a.quota_at = time.time() - 3 * proxy.PROBE_EVERY
+    assert time.time() - a.quota_at > proxy.PROBE_EVERY, "stale: ask"
+
+
+def test_the_backoff_outlives_a_restart():
+    import json
+    import tempfile
+    from helpers import pool
+    a = account("x")
+    a.probe_blocked_until = time.time() + 300
+    a.quota_at = time.time()
+    p = pool(a)
+    with tempfile.TemporaryDirectory() as d:
+        old = proxy.STATE_FILE
+        proxy.STATE_FILE = os.path.join(d, "state.json")
+        try:
+            proxy.save_state(p)
+            saved = json.load(open(proxy.STATE_FILE))["accounts"]["x"]
+            assert saved["probe_blocked_until"] > time.time()
+            fresh_pool = pool(account("x"))
+            proxy.load_state(fresh_pool)
+        finally:
+            proxy.STATE_FILE = old
+    assert fresh_pool.find("x").probe_wait > 0, "a restart must not skip the wait"
+
+
+def test_the_profile_is_not_fetched_on_every_probe():
+    """Asking for an identity that never changes doubled the traffic."""
+    a = account("x")
+    a.email = "someone@example.com"
+    a.profile_at = time.time()
+    assert proxy.PROFILE_EVERY > proxy.PROBE_EVERY * 60
