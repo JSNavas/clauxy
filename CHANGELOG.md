@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- `clauxy restart` — stop and start in one go, whether the proxy is run by
+  hand or by the service. `clauxy stop` refuses to touch a service-managed
+  proxy, and rightly so (launchd or systemd would start it again), which left
+  "pick up new code" meaning "know the service label by heart".
+- The panel **updates itself every second** instead of reloading whole every
+  ten. It re-fetches only the part that changes, pauses in a background tab,
+  and will not redraw while the cursor is inside it, so a button cannot move
+  out from under a click.
 - Sign-ins **renew themselves**. The session token expires in hours, the
   refresh token lasts weeks, and only the Claude CLI is allowed to trade one
   for the other — so clauxy asks it to: a throwaway prompt against that
@@ -17,6 +25,39 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Every panel button did nothing.** The form posted
+  `action=pause|resume|up|down|probe`; the handler read `accion` with Spanish
+  values, so each click fell through to an empty branch and redirected. The
+  dispatch now lives on the pool as `apply_control`, with the accepted names
+  in one place and a test that renders the panel and checks the two sides
+  still agree.
+- The panel's **SWITCHES column read 0** while the log showed real switches.
+  Only a 429 bumped the counter, so leaving an account because its hour filled
+  up or because another one's quota expired sooner — the common case — was
+  invisible. Arriving at the first account on startup is still not counted:
+  nothing was left.
+- The **switch table was wiped by every restart**. `audit` was saved to
+  `state.json` and `events` was not, so the table showed a lone "startup" row
+  and nothing else. Entries now survive, and carry a timestamp: one from two
+  days ago shows its date instead of passing for a bare clock time.
+- A **startup row read like missing data** — no `FROM`, because nothing was
+  handed over. It now says so, in grey, and a table with no real switches in
+  it says that too.
+- **Spend was printed raw**: `$5.3123`. Totals now read like money (`$5.31`),
+  while single requests keep enough digits to stay apart, since rounding
+  fractions of a cent to two decimals turns the log into a column of `$0.02`.
+- **`HTTP 429` next to the token counts** read as if the account were drained.
+  It was `/api/oauth/usage`, the telemetry endpoint, which rate-limits
+  separately from the quota it reports. The message now says what it is and
+  how long is left, and — the actual fix — clauxy stops asking: the button and
+  the once-a-minute probe both honour a backoff taken from `Retry-After`.
+  Nothing before stopped it from earning the next 429.
+- A limit message naming a date **that had just passed** was rolled a whole
+  year forward, and the 8-day cap then parked the account for the better part
+  of a week. The year is now whichever one puts the date closest to now, which
+  is also what makes `Jan 2` read as next year on December 31. The test that
+  should have caught it hard-coded `Nov 5`, so it only failed on the days it
+  felt like.
 - Quota **froze at its last reading**. With the sign-in expired there was no
   telemetry, and the panel kept showing a percentage from a window that had
   already reset — including accounts stuck at 100% whose limit had lifted.

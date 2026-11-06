@@ -69,6 +69,7 @@ Or by hand, for a try-out:
 ```bash
 clauxy start
 clauxy stop
+clauxy restart                # pick up new code, service or not
 ```
 
 ### Running it as a service
@@ -90,8 +91,10 @@ macOS with `kill -9`, back in under 10 seconds.
 This matters more than it looks: whatever points at clauxy has no fallback. If
 the proxy is down, those clients are talking to a dead port.
 
-While the service owns the port, `clauxy stop` will not touch it and says so;
-use `clauxy service uninstall`.
+While the service owns the port, `clauxy stop` will not touch it and says so:
+launchd or systemd would only start it again. To pick up new code, use
+`clauxy restart`, which asks the service manager to do it; to take it down for
+good, `clauxy service uninstall`.
 
 ## Point your tools at it
 
@@ -115,6 +118,22 @@ Per account: the live 5-hour and weekly bars straight from Anthropic, when each
 one comes back, spend, requests, a token breakdown, and buttons to pause or
 reorder. Below, every request with the account that served it, and every
 account switch with the reason it happened.
+
+**It updates itself every second.** The page re-fetches only the part that
+changes, so the account marked `IN USE` is the one serving right now rather
+than the one that was serving up to ten seconds ago. It pauses while the tab is
+in the background, and will not redraw while your cursor is in it, so a button
+cannot move out from under a click.
+
+The switch table survives restarts. Rows with no `FROM` are restarts, not
+switches: nothing was handed over, the proxy simply came up on that account.
+
+### Spend is indicative
+
+On a subscription you do not pay per token. The dollar figures are what the
+same traffic would cost at public API prices — useful to compare accounts
+against each other, and nothing you are billed. The quota bars are the real
+limit.
 
 ## How it picks
 
@@ -144,6 +163,7 @@ clauxy label <alias> <text>   name an account in the panel
 clauxy remove <alias>         forget an account
 
 clauxy start | stop | status  run the proxy by hand
+clauxy restart                stop and start, service or not
 clauxy service install        start on login, restart on crash
 clauxy check                  try every account with the real Claude CLI
 
@@ -166,6 +186,12 @@ clauxy login <alias>
 
 It is a regular sign-in in that account's isolated config dir, used **only to
 read quota**. Requests keep going out with the long-lived token.
+
+The **Refresh quota** button and the background probe both go to
+`/api/oauth/usage`, which has a rate limit of its own — separate from the quota
+it reports. If you hit it, the panel says `too many quota checks - retrying in
+…` and stops asking until it clears. That is the telemetry endpoint being busy,
+not the account being drained: the bars already on screen stay valid.
 
 ### Reusing a sign-in you already have
 

@@ -1,6 +1,7 @@
 """Reading quota: response headers, limit messages, and what is not quota."""
 
 import time
+from datetime import datetime, timedelta
 
 from helpers import account, headers, load
 
@@ -26,11 +27,37 @@ def test_malformed_headers_do_not_raise():
     assert proxy.quota_from_headers({"unified-5h-utilization": "xx"}) == {}
 
 
+def _limit_message(days_ahead):
+    """A limit message naming a date relative to today.
+
+    Hard-coding "Nov 5" made this test pass or fail depending on the day it
+    was run, which is how a real bug in the year rollover hid behind it.
+    """
+    when = datetime.now().astimezone() + timedelta(days=days_ahead)
+    return (f"You've hit your weekly limit - resets "
+            f"{when.strftime('%b')} {when.day} at 12pm")
+
+
 def test_reads_the_reset_time_out_of_a_limit_message():
     """Without telemetry this is the only source for when quota comes back."""
-    secs = proxy.seconds_until_reset(
-        "You've hit your weekly limit - resets Nov 5 at 12pm")
+    secs = proxy.seconds_until_reset(_limit_message(2))
     assert secs is not None and 0 < secs < 15 * 24 * 3600
+
+
+def test_a_date_that_just_passed_is_not_a_year_away():
+    """It used to roll a whole year forward, parking the account for days.
+
+    The cap is 8 days, so a message naming yesterday took the account out of
+    rotation for the better part of a week.
+    """
+    assert proxy.seconds_until_reset(_limit_message(-1)) == 0
+
+
+def test_a_date_a_few_days_out_lands_a_few_days_out():
+    """Run near New Year this is also the rollover case: on December 30 the
+    message names a January date, and the answer must still be three days."""
+    secs = proxy.seconds_until_reset(_limit_message(3))
+    assert 2 * 24 * 3600 < secs < 4 * 24 * 3600
 
 
 def test_ignores_text_with_no_reset_in_it():
@@ -81,3 +108,25 @@ def test_quota_survives_a_restart(tmp=None):
         assert fresh.requests == 7
         assert fresh.window("five_hour")[0] == 42
         assert fresh.window("seven_day")[0] == 17
+
+
+def test_a_throttled_usage_endpoint_is_not_the_accounts_quota():
+    """"HTTP 429" on screen read like the account was drained. It is not:
+
+    /api/oauth/usage rate-limits on its own, and the bars already on screen
+    stay valid — they just stop being refreshed for a while.
+    """
+    a = account("x")
+    a.probe_blocked_until = time.time() + 90
+    before = dict(a.quota)
+    a.probe_quota()
+    assert "too many quota checks" in a.quota_error
+    assert "429" not in a.quota_error
+    assert a.quota == before, "a throttled probe must not wipe what we knew"
+    assert a.available, "the endpoint being busy says nothing about quota"
+
+
+def test_the_backoff_clears_once_it_can_read_again():
+    a = account("x")
+    a.probe_blocked_until = time.time() - 1
+    assert a.probe_wait == 0

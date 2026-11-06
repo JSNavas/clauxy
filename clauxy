@@ -481,6 +481,56 @@ def cmd_stop(args):
     print(f"stopped (pid {pid})")
 
 
+def cmd_restart(args):
+    """Pick up new code without having to know how the proxy is being run.
+
+    `stop` refuses to touch a service-managed proxy, and rightly so: launchd
+    or systemd would just start it again. So restarting used to mean knowing
+    the service label by heart, which is exactly what a command is for.
+    """
+    banner('restarting')
+    if service_loaded():
+        if IS_MAC:
+            out = subprocess.run(
+                ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{SERVICE}"],
+                capture_output=True, text=True)
+        else:
+            out = subprocess.run(["systemctl", "--user", "restart", "clauxy"],
+                                 capture_output=True, text=True)
+        if out.returncode != 0:
+            sys.exit(f"the service refused to restart: "
+                     f"{(out.stderr or out.stdout).strip()[:200]}")
+        if proxy_answers(args.port, tries=25):
+            pid = proxy_pid()
+            print(f"clauxy restarted (pid {pid})  [service]"
+                  if pid else "clauxy restarted  [service]")
+            print(f"  PANEL     http://127.0.0.1:{args.port}/_status")
+        else:
+            print(f"restarted but did not answer. See {LOGFILE}")
+        return
+
+    pid = proxy_pid()
+    if pid:
+        os.kill(pid, signal.SIGTERM)
+        for _ in range(50):
+            if not proxy_pid():
+                break
+            time.sleep(0.1)
+        else:
+            os.kill(pid, signal.SIGKILL)
+        if os.path.exists(PIDFILE):
+            os.unlink(PIDFILE)
+        print(f"stopped (pid {pid})")
+        # The old process has to let go of the port before the new one binds.
+        for _ in range(50):
+            if not proxy_answers(args.port):
+                break
+            time.sleep(0.1)
+    else:
+        print("was not running")
+    cmd_start(args)
+
+
 def cmd_status(args):
     banner('')
     pid = proxy_pid()
@@ -606,6 +656,7 @@ Daily use:
   clauxy status                   is it up? which account is serving?
   clauxy list                     accounts and labels
   clauxy start | stop             run the proxy by hand
+  clauxy restart                  pick up new code, service or not
 
 Accounts:
   clauxy label <alias> <text>     name an account in the panel
@@ -660,6 +711,8 @@ def main():
 
     for name, fn, helptext in (("start", cmd_start, "run the proxy"),
                                ("stop", cmd_stop, "stop the proxy"),
+                               ("restart", cmd_restart,
+                                "stop and start, service or not"),
                                ("status", cmd_status, "is it up? which account serves?")):
         p = sub.add_parser(name, help=helptext)
         p.add_argument("--port", type=int, default=4000)

@@ -60,3 +60,25 @@ def test_falls_back_to_whoever_revives_soonest():
     p = pool(account("late", util_5h=100, reset_5h_h=5),
              account("early", util_5h=100, reset_5h_h=1))
     assert p.pick().alias == "early"
+
+
+def test_a_planned_switch_is_counted():
+    """The panel's SWITCHES column read 0 while the log showed real switches.
+
+    Only a 429 used to bump the counter, so leaving an account because its
+    hour filled up — the common case — was invisible.
+    """
+    p = pool(account("hot", util_5h=85), account("cool", util_5h=10))
+    p.active = "hot"
+    p.order()
+    assert p.find("hot").switches_away == 1
+    assert p.failovers == 1
+    assert p.find("cool").switches_away == 0
+
+
+def test_startup_is_not_a_switch():
+    """Arriving at the first account is not leaving anything."""
+    p = pool(account("a"), account("b"))
+    p.order()
+    assert p.failovers == 0
+    assert all(a.switches_away == 0 for a in p.accounts)

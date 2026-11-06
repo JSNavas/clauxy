@@ -60,6 +60,7 @@ HOP_BY_HOP = {
 RETRYABLE = {429, 529}
 
 DEFAULT_COOLDOWN = 300        # si la respuesta no trae `retry-after`
+PROBE_BACKOFF_S = 120         # `/api/oauth/usage` rate-limits separately
 MAX_COOLDOWN = 8 * 24 * 3600  # tope. Alto a proposito: el limite SEMANAL puede
                               # be more than 24 h away, and a short cap makes the
                               # panel promise a comeback that will not happen.
@@ -288,6 +289,9 @@ def save_state(pool):
         "saved": time.time(),
         "failovers": pool.failovers,
         "audit": list(pool.audit),
+        # The switch table was the one thing a restart still wiped, so it
+        # always showed a lone "startup" row and nothing else.
+        "events": list(pool.events),
         "accounts": {
             a.alias: {
                 "requests": a.requests,
@@ -323,6 +327,8 @@ def load_state(pool):
     except (OSError, ValueError):
         return False
     pool.failovers = data.get("failovers", 0)
+    for entry in reversed(data.get("events") or []):
+        pool.events.appendleft(entry)
     for entry in reversed(data.get("audit", [])):
         # Records from before favicon requests were answered locally: they
         # were never real traffic and only clutter the log.
@@ -418,6 +424,9 @@ class Account:
         self.email = None          # de /api/oauth/profile
         self.plan = None
         self.quota = {}            # de /api/oauth/usage
+        # The usage endpoint rate-limits on its own, separately from the
+        # quota it reports. Asking harder after a 429 only extends it.
+        self.probe_blocked_until = 0.0
         self.quota_error = None
         self.session_expired = False
         self.renew_tried = 0.0     # last attempt to renew the sign-in
@@ -552,8 +561,22 @@ class Account:
         self.session_expired = False
         return oauth.get("accessToken")
 
+    @property
+    def probe_wait(self):
+        """Seconds left before the usage endpoint will talk to us again."""
+        return max(0, int(self.probe_blocked_until - time.time()))
+
     def probe_quota(self):
-        """Asks Anthropic how much this account has left. Costs no quota."""
+        """Asks Anthropic how much this account has left. Costs no quota.
+
+        It does cost patience: `/api/oauth/usage` has a rate limit of its own.
+        While it is refusing, this returns without asking again — a button
+        that fires one more 429 is worse than a button that says to wait.
+        """
+        if self.probe_wait:
+            self.quota_error = (
+                f"too many quota checks - retrying in {clock(self.probe_wait)}")
+            return
         self.session_expired = False
         credential = self.session_token() or self.token
         error = None
@@ -572,10 +595,23 @@ class Account:
                     # A sign-in that has lapsed and a work token that was
                     # never allowed to read telemetry look identical here;
                     # only the first one is news, so name it.
-                    error = (f"session expired - run: clauxy login {self.alias}"
-                             if self.session_expired else
-                             f"quota unknown - run: clauxy login {self.alias}"
-                             if exc.code in (401, 403) else f"HTTP {exc.code}")
+                    if exc.code == 429:
+                        # Not the account's quota: the telemetry endpoint
+                        # itself. The bars on screen stay valid, they just
+                        # stop being refreshed for a while.
+                        wait = parse_retry_after(
+                            exc.headers.get("retry-after")) if exc.headers \
+                            else PROBE_BACKOFF_S
+                        wait = max(PROBE_BACKOFF_S, min(wait, MAX_COOLDOWN))
+                        self.probe_blocked_until = time.time() + wait
+                        error = ("too many quota checks - retrying in "
+                                 f"{clock(wait)}")
+                    else:
+                        error = (f"session expired - run: clauxy login {self.alias}"
+                                 if self.session_expired else
+                                 f"quota unknown - run: clauxy login {self.alias}"
+                                 if exc.code in (401, 403)
+                                 else f"could not read quota (HTTP {exc.code})")
                 continue
             except Exception as exc:
                 if target == "quota":
@@ -583,6 +619,7 @@ class Account:
                 continue
             if target == "quota":
                 self.quota = item
+                self.probe_blocked_until = 0.0
             else:
                 who = item.get("account", {})
                 self.email = who.get("email")
@@ -715,10 +752,44 @@ class Pool:
             return "la otra caduca antes"
         return None
 
+    #: What the panel's buttons may ask for. The form in `render_panel`
+    #: posts these exact strings; keeping the list here is what lets a test
+    #: catch the two drifting apart again.
+    CONTROLS = ("pause", "resume", "up", "down", "probe")
+
+    def apply_control(self, alias, action):
+        """Act on one of the panel buttons. True when something happened."""
+        account = self.find(alias)
+        if not account or action not in self.CONTROLS:
+            return False
+        if action == "pause":
+            account.paused = True
+        elif action == "resume":
+            account.paused = False
+            account.cooling_until = 0.0
+        elif action == "up":
+            self.move(alias, -1)
+        elif action == "down":
+            self.move(alias, +1)
+        elif action == "probe":
+            account.probe_quota()
+        self.dirty = True
+        return True
+
     def record_switch(self, frm, to, reason):
         self.last_switch = time.time()
+        # Every departure counts, not only the ones a 429 forced. Leaving an
+        # account because its hour filled up or because another one's quota
+        # expires sooner is still leaving it, and the panel promised a count.
+        # Startup has no `frm`: arriving somewhere is not a switch.
+        if frm is not None:
+            frm.switches_away += 1
+            self.failovers += 1
         self.events.appendleft({
             "time": time.strftime("%H:%M:%S"),
+            # The table outlives restarts now, so a bare clock would show
+            # yesterday's switch as if it had just happened.
+            "ts": time.time(),
             "from": frm.alias if frm else None,
             "to": to.alias,
             "reason": reason,
@@ -849,9 +920,22 @@ def seconds_until_reset(texto):
     if m.group("mes"):
         mes = MESES.get(m.group("mes").lower())
         if mes:
-            target = target.replace(month=mes, day=int(m.group("dia")))
-            if target < now:                    # month already passed: next year
-                target = target.replace(year=target.year + 1)
+            # The message carries no year. Picking the candidate closest to
+            # now is what makes 'Jan 2' read as next year on December 31 and
+            # 'Dec 31' as last year on January 2 — while a date that merely
+            # passed a few hours ago stays in the past, where it belongs.
+            # Rolling it a whole year forward parked the account for days.
+            best = None
+            for year in (now.year - 1, now.year, now.year + 1):
+                try:
+                    cand = target.replace(year=year, month=mes,
+                                          day=int(m.group("dia")))
+                except ValueError:
+                    continue            # Feb 29 of a year that has no Feb 29
+                if best is None or abs(cand - now) < abs(best - now):
+                    best = cand
+            if best is not None:
+                target = best
     elif target <= now:                        # time only: means tomorrow
         target += timedelta(days=1)
     return max(0, int((target - now).total_seconds()))
@@ -949,21 +1033,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         """Panel buttons: pause, resume, raise and lower priority."""
         n = int(self.headers.get("Content-Length") or 0)
         campos = urllib.parse.parse_qs(self.rfile.read(n).decode())
-        accion = (campos.get("accion") or [""])[0]
-        alias = (campos.get("alias") or [""])[0]
-        account = self.pool.find(alias)
-        if account:
-            if accion == "pausar":
-                account.paused = True
-            elif accion == "reanudar":
-                account.paused = False
-                account.cooling_until = 0.0
-            elif accion == "subir":
-                self.pool.move(alias, -1)
-            elif accion == "bajar":
-                self.pool.move(alias, +1)
-            elif accion == "sondear":
-                account.probe_quota()
+        # These names are the ones the form posts. They used to be read under
+        # Spanish keys, so every button silently did nothing but redirect.
+        self.pool.apply_control((campos.get("alias") or [""])[0],
+                                (campos.get("action") or [""])[0])
         self.send_response(303)
         self.send_header("Location", "/_status")
         self.send_header("Content-Length", "0")
@@ -1228,6 +1301,40 @@ def bar(pct, label, extra="", empty="no data"):
             f'<span class="val">{pct:.0f}% {extra}</span></div>')
 
 
+def money(usd):
+    """A dollar amount a person can read at a glance.
+
+    Totals are money, so they get the two decimals money has: "$5.31", not
+    "$5.3123". Single requests cost fractions of a cent, and rounding those to
+    two decimals turns the whole log into a column of "$0.02", so small
+    amounts keep enough digits to stay distinguishable.
+    """
+    if usd is None:
+        return "—"
+    if usd == 0:
+        return "$0.00"
+    if abs(usd) >= 1:
+        return f"${usd:,.2f}"
+    if abs(usd) >= 0.01:
+        return f"${usd:.3f}"
+    return f"${usd:.5f}"
+
+
+def switch_when(event):
+    """The clock for today's switches, the date as well for older ones.
+
+    Entries survive restarts, so "16:14:50" on its own would pass off a switch
+    from two days ago as something that just happened.
+    """
+    stamp = event.get("ts")
+    if not stamp:
+        return event.get("time", "—")      # saved before `ts` existed
+    when = datetime.fromtimestamp(stamp)
+    if when.date() == datetime.now().date():
+        return when.strftime("%H:%M:%S")
+    return when.strftime("%b %-d %H:%M:%S")
+
+
 def render_panel(snap):
     queue = snap.get("queue") or [c["alias"] for c in snap["accounts"] if c["available_"]]
     # Before the first request there is no "active" account: show the one that
@@ -1325,7 +1432,7 @@ def render_panel(snap):
   {bar(w7['pct'], 'Weekly', reset_label(w7), empty_label(w7, no_telemetry))}
 
   <dl>
-    <div><dt>Spend</dt><dd class="big">${c['usd']:.4f}</dd></div>
+    <div><dt>Spend</dt><dd class="big">{money(c['usd'])}</dd></div>
     <div><dt>Requests</dt><dd class="big">{c['requests_']}</dd></div>
     <div><dt>Tokens</dt><dd class="big">{thousands(total_tk)}</dd></div>
     <div><dt>Switches</dt><dd class="big">{c['switches']}</dd></div>
@@ -1346,11 +1453,22 @@ def render_panel(snap):
 </article>""")
 
     ev = snap.get("events") or []
-    switches_html = ("<h3>Account switches</h3><table>"
+    # A startup is not a switch: nothing was left, so FROM is empty and the
+    # row looked broken. Say what it actually is.
+    def _row(e):
+        start = not e["from"]
+        frm = '<i class=hint>proxy started</i>' if start else e["from"]
+        reason = "now serving this account" if start else e["reason"]
+        return (f'<tr class="{"muted" if start else ""}"><td>{switch_when(e)}</td>'
+                f'<td>{frm}</td><td><b>{e["to"]}</b></td><td>{reason}</td></tr>')
+
+    real = [e for e in ev if e["from"]]
+    note = ("" if real else
+            "<p class=none>No switches yet — the rows below are restarts. "
+            "A switch is recorded when one account hands over to another.</p>")
+    switches_html = ("<h3>Account switches</h3>" + note + "<table>"
                      "<tr><th>Time</th><th>From</th><th>To</th><th>Reason</th></tr>"
-                     + "".join(f'<tr><td>{e["time"]}</td><td>{e["from"] or "—"}</td>'
-                               f'<td><b>{e["to"]}</b></td><td>{e["reason"]}</td></tr>'
-                               for e in ev)
+                     + "".join(_row(e) for e in ev)
                      + "</table>") if ev else ""
 
     rows = []
@@ -1370,7 +1488,7 @@ def render_panel(snap):
             f'<td>{e["model"] or e.get("path") or "?"}</td>'
             f'<td><b>{e["account"]}</b>{mark}</td><td>{e["status"]}</td>'
             f'<td>{detail}</td>'
-            f'<td>{"$%.5f" % e["usd"] if e["usd"] is not None else "—"}</td>'
+            f'<td>{money(e["usd"])}</td>'
             f'<td>{e["ms"]} ms</td></tr>'
         )
 
@@ -1380,6 +1498,7 @@ def render_panel(snap):
 <table class="cmds">
 <tr><td><code>clauxy status</code></td><td>is it up? which account is serving?</td></tr>
 <tr><td><code>clauxy start</code> / <code>stop</code></td><td>run the proxy by hand</td></tr>
+<tr><td><code>clauxy restart</code></td><td>pick up new code, service or not</td></tr>
 <tr><td><code>clauxy service install</code></td><td>start on login, restart on crash</td></tr>
 <tr><td><code>clauxy add &lt;alias&gt;</code></td><td>add an account</td></tr>
 <tr><td><code>clauxy label acct-1 you@example.com</code></td><td>set the label shown above</td></tr>
@@ -1392,19 +1511,11 @@ def render_panel(snap):
 account that has not served anything yet has no numbers. Run
 <code>clauxy login &lt;alias&gt;</code> to let clauxy query quota directly for
 idle accounts too.</p>
-</dialog>
-<script>
-(function () {
-  var d = document.getElementById('cmds');
-  document.getElementById('open-cmds').onclick = function () { d.showModal(); };
-  d.addEventListener('click', function (e) { if (e.target === d) d.close(); });
-})();
-</script>"""
+</dialog>"""
 
     return f"""<!doctype html><html lang=en><meta charset=utf-8>
 <title>clauxy</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<meta http-equiv=refresh content=10>
 <style>
 :root{{--bg:#f6f7f9;--card:#fff;--fg:#14161a;--mut:#6b7280;--line:#e5e7eb;
 --ok:#16a34a;--warn:#d97706;--err:#dc2626;--fill:#2563eb;--act:#2563eb}}
@@ -1495,15 +1606,17 @@ border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:14px 0 6p
 .hint{{display:block;font-style:normal;color:var(--mut);font-size:10.5px;margin-top:2px}}
 .reset{{background:var(--bg);border-radius:8px;padding:9px 12px;margin:0 0 12px;font-size:13px}}
 .reset b{{font-variant-numeric:tabular-nums}}
+tr.muted td{{color:var(--mut)}}
 .reset.wait{{background:color-mix(in srgb,var(--warn) 12%,transparent);color:var(--warn)}}
 .reset.wait b{{color:var(--warn)}}
 .reset.ok{{color:var(--ok)}}
 .reset.unknown{{color:var(--mut)}}
 .reset small{{display:block;color:var(--mut);font-size:11px;margin-top:3px}}
 </style>
+<div id=live>
 <div class=top>
   <h1>clauxy <button id="open-cmds" class="btn-cmds">Commands</button></h1>
-  <div class=val><b>${snap['usd_total']:.4f}</b> · {snap['requests__total']} requests
+  <div class=val><b>{money(snap['usd_total'])}</b> · {snap['requests__total']} requests
    · {snap['switches']} switches</div>
 </div>
 <div class=now>
@@ -1514,7 +1627,7 @@ border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:14px 0 6p
   <div><span>Strategy</span><b>{snap.get('mode','?')}</b>
        <i class=hint>{f"switch at {THRESHOLD_5H:.0f}% · spend perishable first" if snap.get('mode')=='sequential' else 'each client keeps its own'}</i></div>
 </div>
-<p class=sub>Up for {clock(snap['started_s_ago'])} · this page refreshes every 10 s</p>
+<p class=sub>Up for {clock(snap['started_s_ago'])} · live</p>
 
 {commands}
 
@@ -1529,40 +1642,82 @@ border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:14px 0 6p
 {"".join(rows) or '<tr><td colspan=7 class=none>No requests yet.</td></tr>'}
 </table>
 <div class=pager id="pager"></div>
-<script>
-(function () {{
-  // The snapshot carries more rows than fit on screen. Paging them here keeps
-  // the page short without a round trip, and survives the 10 s auto-refresh
-  // because the page simply starts on the first page again.
-  var PER = {LOG_PAGE};
-  var rows = Array.from(document.querySelectorAll('#log tr')).slice(1)
-                  .filter(function (r) {{ return !r.querySelector('.none'); }});
-  var pager = document.getElementById('pager');
-  if (rows.length <= PER) {{ return; }}
-  var pages = Math.ceil(rows.length / PER), page = 0;
-  function draw() {{
-    rows.forEach(function (r, i) {{
-      r.style.display = (i >= page * PER && i < (page + 1) * PER) ? '' : 'none';
-    }});
-    pager.innerHTML = '';
-    var prev = document.createElement('button');
-    prev.textContent = '‹ newer'; prev.disabled = page === 0;
-    prev.onclick = function () {{ page--; draw(); }};
-    var next = document.createElement('button');
-    next.textContent = 'older ›'; next.disabled = page >= pages - 1;
-    next.onclick = function () {{ page++; draw(); }};
-    var label = document.createElement('span');
-    label.textContent = (page * PER + 1) + '-' +
-      Math.min((page + 1) * PER, rows.length) + ' of ' + rows.length;
-    pager.appendChild(prev); pager.appendChild(label); pager.appendChild(next);
-  }}
-  draw();
-}})();
-</script>
 
 <p class=note><b>Spend is indicative.</b> On a subscription you do not pay per
 token: this is what the same traffic would cost at public API prices, useful to
 compare accounts against each other. The quota bars are the real limit.</p>
+</div>
+<script>
+(function () {{
+  // The panel used to be a meta-refresh every 10 s, so "IN USE" could name the
+  // account you had already left for up to ten seconds. It now re-fetches
+  // itself every second and swaps the part that changes, which is also why all
+  // the wiring lives out here: markup inserted through innerHTML never runs
+  // its own <script>.
+  var PER = {LOG_PAGE};
+  var page = 0;          // kept across refreshes, so paging does not jump back
+
+  function pager() {{
+    var rows = Array.from(document.querySelectorAll('#log tr')).slice(1)
+                    .filter(function (r) {{ return !r.querySelector('.none'); }});
+    var box = document.getElementById('pager');
+    if (!box) {{ return; }}
+    box.innerHTML = '';
+    if (rows.length <= PER) {{ return; }}
+    var pages = Math.ceil(rows.length / PER);
+    if (page >= pages) {{ page = pages - 1; }}
+    rows.forEach(function (r, i) {{
+      r.style.display = (i >= page * PER && i < (page + 1) * PER) ? '' : 'none';
+    }});
+    var prev = document.createElement('button');
+    prev.textContent = '\u2039 newer'; prev.disabled = page === 0;
+    prev.onclick = function () {{ page--; pager(); }};
+    var next = document.createElement('button');
+    next.textContent = 'older \u203a'; next.disabled = page >= pages - 1;
+    next.onclick = function () {{ page++; pager(); }};
+    var label = document.createElement('span');
+    label.textContent = (page * PER + 1) + '-' +
+      Math.min((page + 1) * PER, rows.length) + ' of ' + rows.length;
+    box.appendChild(prev); box.appendChild(label); box.appendChild(next);
+  }}
+
+  function dialog(reopen) {{
+    var d = document.getElementById('cmds');
+    var open_ = document.getElementById('open-cmds');
+    if (!d || !open_) {{ return; }}
+    open_.onclick = function () {{ d.showModal(); }};
+    d.addEventListener('click', function (e) {{ if (e.target === d) d.close(); }});
+    if (reopen && !d.open) {{ d.showModal(); }}
+  }}
+
+  function wire(reopen) {{ pager(); dialog(reopen); }}
+
+  function tick() {{
+    if (document.hidden) {{ return; }}
+    // Never redraw out from under a button the user is about to press, or a
+    // dialog they are reading past the first line.
+    var live = document.getElementById('live');
+    var focus = document.activeElement;
+    if (focus && focus !== document.body && live.contains(focus)) {{ return; }}
+    fetch('/_status', {{cache: 'no-store'}})
+      .then(function (r) {{ return r.ok ? r.text() : null; }})
+      .then(function (html) {{
+        if (!html) {{ return; }}
+        var fresh = new DOMParser().parseFromString(html, 'text/html')
+                        .getElementById('live');
+        if (!fresh) {{ return; }}
+        var d = document.getElementById('cmds');
+        var wasOpen = !!(d && d.open);
+        live.innerHTML = fresh.innerHTML;
+        wire(wasOpen);
+      }})
+      .catch(function () {{}});   // the proxy restarting is not worth a stack trace
+  }}
+
+  wire(false);
+  setInterval(tick, 1000);
+}})();
+</script>
 </html>"""
 
 
@@ -1585,6 +1740,10 @@ def watch_quotas(pool, every=60):
     """Probes every account's quota once a minute, in the background."""
     while True:
         for account in list(pool.accounts):
+            # Backing off is the whole point: hammering the usage endpoint
+            # through its own rate limit is what earned the 429.
+            if account.probe_wait:
+                continue
             try:
                 account.probe_quota()
             except Exception:
