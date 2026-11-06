@@ -166,3 +166,48 @@ def test_a_real_switch_still_names_both_sides():
     html = proxy.render_panel(p.snapshot())
     assert "No switches yet" not in html
     assert "<td>hot</td>" in html and "<b>cool</b>" in html
+
+
+def _busy_pool(switches=14, requests=27):
+    p = pool(account("a"), account("b"))
+    for i in range(switches):
+        p.record_switch(p.find("a"), p.find("b"), f"r{i}")
+    row = {"time": "10:00:00", "model": "m", "account": "a", "status": 200,
+           "switched": False, "own": True, "ms": 10,
+           "tokens": {"input": 1, "output": 1, "cache_write": 0, "cache_read": 0},
+           "usd": 0.001}
+    for _ in range(requests):
+        p.audit.appendleft(dict(row))
+    return p
+
+
+def _slices(html):
+    return re.findall(r"<span>([\d\-]+ of \d+)</span>", html)
+
+
+def test_only_the_page_you_asked_for_is_built():
+    """The page used to carry every row and hide most with CSS, once a second."""
+    snap = _busy_pool().snapshot()
+    assert _slices(proxy.render_panel(snap)) == ["1-5 of 15", "1-10 of 27"]
+    assert _slices(proxy.render_panel(snap, sw_page=1, log_page=2)) \
+        == ["6-10 of 15", "21-27 of 27"]
+
+
+def test_a_page_past_the_end_is_clamped_not_blank():
+    snap = _busy_pool().snapshot()
+    html = proxy.render_panel(snap, sw_page=99, log_page=99)
+    assert _slices(html) == ["11-15 of 15", "21-27 of 27"]
+    assert 'data-sw="2" data-log="2"' in html, "the page must say where it landed"
+
+
+def test_no_pager_when_everything_fits():
+    p = pool(account("a"))
+    p.record_switch(p.find("a"), p.find("a"), "once")
+    assert "class=pager" not in proxy.render_panel(p.snapshot())
+
+
+def test_the_pager_buttons_name_the_page_they_load():
+    html = proxy.render_panel(_busy_pool().snapshot())
+    assert 'data-page="sw:1"' in html and 'data-page="log:1"' in html
+    # ‹ newer on page 0 has nowhere to go
+    assert 'data-page="sw:-1" disabled' in html

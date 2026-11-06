@@ -12,6 +12,11 @@ All notable changes to this project are documented here. The format follows
   hand or by the service. `clauxy stop` refuses to touch a service-managed
   proxy, and rightly so (launchd or systemd would start it again), which left
   "pick up new code" meaning "know the service label by heart".
+- Both panel tables are **paged by the server**: five switches, ten log rows.
+  The page used to be handed every row and hide most of them with CSS — once
+  a second, now that it refreshes itself — so it grew with history and sent
+  the same hidden rows over and over. Clicking the pager asks for that slice
+  instead, and a page out of range is clamped rather than left blank.
 - The panel **updates itself every second** instead of reloading whole every
   ten. It re-fetches only the part that changes, pauses in a background tab,
   and will not redraw while the cursor is inside it, so a button cannot move

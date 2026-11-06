@@ -66,7 +66,8 @@ PROBE_BACKOFF_S = 120         # `/api/oauth/usage` rate-limits separately
 MAX_COOLDOWN = 8 * 24 * 3600  # tope. Alto a proposito: el limite SEMANAL puede
                               # be more than 24 h away, and a short cap makes the
                               # panel promise a comeback that will not happen.
-LOG_PAGE = 15                 # rows per page in the request log
+LOG_PAGE = 10                 # rows per page in the request log
+SWITCH_PAGE = 5               # rows per page in the switch table
 AUDIT_MAX = 500           # requests kept in the in-memory log
 
 # Switch thresholds, as a % of each window. We move BEFORE hitting the wall:
@@ -878,11 +879,13 @@ class Pool:
                 # The real serving order right now, so the panel can name who
                 # takes the next request even before any has arrived.
                 "queue": queue,
-                "events": list(self.events)[:12],
+                # Paging is served from here, so keep more than one page.
+                # Only the rows actually on screen reach the browser.
+                "events": list(self.events),
                 "thresholds": {"five_hour": THRESHOLD_5H, "weekly": THRESHOLD_7D},
                 "usd_total": round(sum(a.usd for a in self.accounts), 4),
                 "requests__total": sum(a.requests for a in self.accounts),
-                "audit": list(self.audit)[:60],
+                "audit": list(self.audit)[:200],
             }
 
 
@@ -1043,13 +1046,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _panel(self, as_json):
+    def _panel(self, as_json, query=None):
         snap = self.pool.snapshot()
         if as_json:
             self._envia(json.dumps(snap, indent=2).encode(),
                         "application/json; charset=utf-8")
-        else:
-            self._envia(render_panel(snap).encode(), "text/html; charset=utf-8")
+            return
+
+        def page_of(name):
+            try:
+                return max(0, int((query or {}).get(name, ["0"])[0]))
+            except (TypeError, ValueError):
+                return 0
+
+        # Which slice to render is the client's to say. The page asks for the
+        # one it is showing, so the rows it is not showing are never built.
+        body = render_panel(snap, sw_page=page_of("sw"), log_page=page_of("log"))
+        self._envia(body.encode(), "text/html; charset=utf-8")
 
     def _control(self):
         """Panel buttons: pause, resume, raise and lower priority."""
@@ -1083,8 +1096,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
-        if self.path in ("/_status", "/_status.json"):
-            self._panel(self.path.endswith(".json"))
+        route, _, query = self.path.partition("?")
+        if route in ("/_status", "/_status.json"):
+            self._panel(route.endswith(".json"),
+                        urllib.parse.parse_qs(query))
             return
         if self.path == "/_control" and method == "POST":
             self._control()
@@ -1357,7 +1372,29 @@ def switch_when(event):
     return when.strftime("%b %-d %H:%M:%S")
 
 
-def render_panel(snap):
+def pager_html(name, page, total, per):
+    """The ‹ newer / older › control under a table, rendered server side.
+
+    The buttons carry the page they would load; the script turns that into
+    the next fetch. Rendering it here is what lets the page ask for one
+    slice instead of being handed every row and hiding most of them.
+    """
+    pages = max(1, math.ceil(total / per))
+    if pages <= 1:
+        return ""
+    first = page * per + 1
+    last = min((page + 1) * per, total)
+    def button(label, to, disabled):
+        flag = " disabled" if disabled else ""
+        return (f'<button data-page="{name}:{to}"{flag}>{label}</button>')
+    return (f'<div class=pager>'
+            + button("‹ newer", page - 1, page == 0)
+            + f"<span>{first}-{last} of {total}</span>"
+            + button("older ›", page + 1, page >= pages - 1)
+            + "</div>")
+
+
+def render_panel(snap, sw_page=0, log_page=0):
     queue = snap.get("queue") or [c["alias"] for c in snap["accounts"] if c["available_"]]
     # Before the first request there is no "active" account: show the one that
     # will serve, which is what you want to know when you open the panel.
@@ -1488,13 +1525,18 @@ def render_panel(snap):
     note = ("" if real else
             "<p class=none>No switches yet — the rows below are restarts. "
             "A switch is recorded when one account hands over to another.</p>")
+    sw_page = min(sw_page, max(0, (len(ev) - 1) // SWITCH_PAGE))
+    shown = ev[sw_page * SWITCH_PAGE:(sw_page + 1) * SWITCH_PAGE]
     switches_html = ("<h3>Account switches</h3>" + note + "<table>"
                      "<tr><th>Time</th><th>From</th><th>To</th><th>Reason</th></tr>"
-                     + "".join(_row(e) for e in ev)
-                     + "</table>") if ev else ""
+                     + "".join(_row(e) for e in shown)
+                     + "</table>"
+                     + pager_html("sw", sw_page, len(ev), SWITCH_PAGE)) if ev else ""
 
+    audit = snap["audit"]
+    log_page = min(log_page, max(0, (len(audit) - 1) // LOG_PAGE))
     rows = []
-    for e in snap["audit"]:
+    for e in audit[log_page * LOG_PAGE:(log_page + 1) * LOG_PAGE]:
         tk = e["tokens"]
         # Cache writes bill at 1.25x input and are usually most of the cost:
         # hiding them made the price look wrong next to the token counts.
@@ -1635,7 +1677,7 @@ tr.muted td{{color:var(--mut)}}
 .reset.unknown{{color:var(--mut)}}
 .reset small{{display:block;color:var(--mut);font-size:11px;margin-top:3px}}
 </style>
-<div id=live>
+<div id=live data-sw="{sw_page}" data-log="{log_page}">
 <div class=top>
   <h1>clauxy <button id="open-cmds" class="btn-cmds">Commands</button></h1>
   <div class=val><b>{money(snap['usd_total'])}</b> · {snap['requests__total']} requests
@@ -1663,7 +1705,7 @@ tr.muted td{{color:var(--mut)}}
     <th>Tokens (in · cache r · cache w / out)</th><th>Cost</th><th>Took</th></tr>
 {"".join(rows) or '<tr><td colspan=7 class=none>No requests yet.</td></tr>'}
 </table>
-<div class=pager id="pager"></div>
+{pager_html("log", log_page, len(audit), LOG_PAGE)}
 
 <p class=note><b>Spend is indicative.</b> On a subscription you do not pay per
 token: this is what the same traffic would cost at public API prices, useful to
@@ -1676,31 +1718,25 @@ compare accounts against each other. The quota bars are the real limit.</p>
   // itself every second and swaps the part that changes, which is also why all
   // the wiring lives out here: markup inserted through innerHTML never runs
   // its own <script>.
-  var PER = {LOG_PAGE};
-  var page = 0;          // kept across refreshes, so paging does not jump back
+  // Which slice each table is showing. The server renders only that slice,
+  // so a page holds ten log rows and five switches no matter how much
+  // history there is — the rest is fetched when you ask for it.
+  var live0 = document.getElementById('live');
+  var pages = {{sw: +live0.dataset.sw || 0, log: +live0.dataset.log || 0}};
 
   function pager() {{
-    var rows = Array.from(document.querySelectorAll('#log tr')).slice(1)
-                    .filter(function (r) {{ return !r.querySelector('.none'); }});
-    var box = document.getElementById('pager');
-    if (!box) {{ return; }}
-    box.innerHTML = '';
-    if (rows.length <= PER) {{ return; }}
-    var pages = Math.ceil(rows.length / PER);
-    if (page >= pages) {{ page = pages - 1; }}
-    rows.forEach(function (r, i) {{
-      r.style.display = (i >= page * PER && i < (page + 1) * PER) ? '' : 'none';
+    document.querySelectorAll('[data-page]').forEach(function (b) {{
+      b.onclick = function () {{
+        var bits = b.dataset.page.split(':');
+        pages[bits[0]] = Math.max(0, parseInt(bits[1], 10) || 0);
+        b.disabled = true;      // until the rows it asked for arrive
+        tick(true);
+      }};
     }});
-    var prev = document.createElement('button');
-    prev.textContent = '\u2039 newer'; prev.disabled = page === 0;
-    prev.onclick = function () {{ page--; pager(); }};
-    var next = document.createElement('button');
-    next.textContent = 'older \u203a'; next.disabled = page >= pages - 1;
-    next.onclick = function () {{ page++; pager(); }};
-    var label = document.createElement('span');
-    label.textContent = (page * PER + 1) + '-' +
-      Math.min((page + 1) * PER, rows.length) + ' of ' + rows.length;
-    box.appendChild(prev); box.appendChild(label); box.appendChild(next);
+  }}
+
+  function query() {{
+    return '/_status?sw=' + pages.sw + '&log=' + pages.log;
   }}
 
   function dialog(reopen) {{
@@ -1714,14 +1750,17 @@ compare accounts against each other. The quota bars are the real limit.</p>
 
   function wire(reopen) {{ pager(); dialog(reopen); }}
 
-  function tick() {{
-    if (document.hidden) {{ return; }}
-    // Never redraw out from under a button the user is about to press, or a
-    // dialog they are reading past the first line.
+  function tick(asked) {{
     var live = document.getElementById('live');
-    var focus = document.activeElement;
-    if (focus && focus !== document.body && live.contains(focus)) {{ return; }}
-    fetch('/_status', {{cache: 'no-store'}})
+    if (!asked) {{
+      // Never redraw out from under a button the user is about to press, or
+      // a dialog they are reading past the first line. A click on the pager
+      // is not an interruption, though — it is the whole point.
+      if (document.hidden) {{ return; }}
+      var focus = document.activeElement;
+      if (focus && focus !== document.body && live.contains(focus)) {{ return; }}
+    }}
+    fetch(query(), {{cache: 'no-store'}})
       .then(function (r) {{ return r.ok ? r.text() : null; }})
       .then(function (html) {{
         if (!html) {{ return; }}
@@ -1731,6 +1770,12 @@ compare accounts against each other. The quota bars are the real limit.</p>
         var d = document.getElementById('cmds');
         var wasOpen = !!(d && d.open);
         live.innerHTML = fresh.innerHTML;
+        live.dataset.sw = fresh.dataset.sw;
+        live.dataset.log = fresh.dataset.log;
+        // The server clamps a page past the end; follow it rather than
+        // keep asking for a slice that is not there.
+        pages.sw = +fresh.dataset.sw || 0;
+        pages.log = +fresh.dataset.log || 0;
         wire(wasOpen);
       }})
       .catch(function () {{}});   // the proxy restarting is not worth a stack trace

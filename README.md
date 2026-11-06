@@ -119,6 +119,10 @@ one comes back, spend, requests, a token breakdown, and buttons to pause or
 reorder. Below, every request with the account that served it, and every
 account switch with the reason it happened.
 
+The switch table and the request log are **paged five and ten rows at a time**,
+and each page is fetched when you ask for it — the page does not carry history
+it is not showing.
+
 **It updates itself every second.** The page re-fetches only the part that
 changes, so the account marked `IN USE` is the one serving right now rather
 than the one that was serving up to ten seconds ago. It pauses while the tab is
