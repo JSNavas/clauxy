@@ -12,7 +12,9 @@ All notable changes to this project are documented here. The format follows
   hand or by the service. `clauxy stop` refuses to touch a service-managed
   proxy, and rightly so (launchd or systemd would start it again), which left
   "pick up new code" meaning "know the service label by heart".
-- Both panel tables are **paged by the server**: five switches, ten log rows.
+- Both panel tables are **paged by the server**: five switches, ten log rows
+  (the log paged at 15 in the browser before, and the switch table not at
+  all).
   The page used to be handed every row and hide most of them with CSS — once
   a second, now that it refreshes itself — so it grew with history and sent
   the same hidden rows over and over. Clicking the pager asks for that slice
@@ -103,7 +105,6 @@ All notable changes to this project are documented here. The format follows
 - Quota bars show the **wall-clock reset time** in the viewer's own timezone
   ("resets at 9:59 PM") instead of repeating the countdown already in the
   headline.
-- The request log pages at 15 rows.
 - A bare `clauxy` lists what it can do, grouped, instead of an argparse error.
 
 ## [0.1.0] - 2026-11-04
