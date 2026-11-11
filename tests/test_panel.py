@@ -211,3 +211,20 @@ def test_the_pager_buttons_name_the_page_they_load():
     assert 'data-page="sw:1"' in html and 'data-page="log:1"' in html
     # ‹ newer on page 0 has nowhere to go
     assert 'data-page="sw:-1" disabled' in html
+
+
+def test_a_full_hour_says_when_it_comes_back():
+    """DRAINED and "5-hour window at 100%" on the same card answered the
+    wrong question. Telemetry reaches 100% without any 429, so there is no
+    `waiting_s` to trigger the usual banner — the window's own reset is the
+    answer, and the card should lead with it."""
+    html = proxy.render_panel(pool(account("spent", util_5h=100)).snapshot())
+    assert "DRAINED" in html
+    assert "Back in" in html, "a spent hour must say when it returns"
+    assert "5-hour window at <b>100%" not in html
+
+
+def test_a_half_spent_hour_still_reads_as_a_status():
+    html = proxy.render_panel(pool(account("busy", util_5h=50)).snapshot())
+    assert "5-hour window at <b>50%" in html
+    assert "Back in" not in html

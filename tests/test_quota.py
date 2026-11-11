@@ -207,7 +207,7 @@ def test_the_limit_message_is_read_out_of_the_json_body():
     assert proxy.is_quota_429(body)
 
 
-def test_a_restart_re_reads_the_quota_instead_of_trusting_the_file(tmpdir=None):
+def test_a_restart_drops_a_stale_lock_verdict(tmpdir=None):
     """The saved `quota` carries an OLD build's verdict; `limits` is raw.
 
     A version that mistook `allowed_warning` for a lock wrote
@@ -223,6 +223,8 @@ def test_a_restart_re_reads_the_quota_instead_of_trusting_the_file(tmpdir=None):
     raw = headers(util_5h="0.33", util_7d="0.95", status_7d="allowed_warning")
     poisoned = proxy.quota_from_headers(raw)
     poisoned["seven_day"]["locked_reason"] = "allowed_warning"
+    # A real lock must survive the load; only the `allowed*` family is cleared.
+    poisoned["five_hour"]["locked_reason"] = None
 
     state = {"accounts": {"c2": {"limits": raw, "quota": poisoned}}}
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
@@ -239,3 +241,31 @@ def test_a_restart_re_reads_the_quota_instead_of_trusting_the_file(tmpdir=None):
     assert c2.quota["seven_day"]["locked_reason"] is None, "the old verdict survived"
     assert not c2.out_of_quota, "95% weekly is not drained"
     assert c2.available and c2.usable
+    # The measurements are left alone: a probe may have refreshed them past
+    # whatever the stored headers say, so re-deriving them would walk back a
+    # fresher reading.
+    assert c2.quota["five_hour"]["utilization"] == 33.0
+    assert c2.quota["seven_day"]["utilization"] == 95.0
+
+
+def test_a_real_lock_survives_the_restart():
+    """Clearing the stale verdict must not clear a genuine one."""
+    import json
+    import tempfile
+
+    pool = proxy.Pool([account("c1")])
+    raw = headers(util_5h="1.0", status_5h="rejected")
+    state = {"accounts": {"c1": {"limits": raw,
+                                 "quota": proxy.quota_from_headers(raw)}}}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(state, fh)
+        path = fh.name
+
+    old, proxy.STATE_FILE = proxy.STATE_FILE, path
+    try:
+        proxy.load_state(pool)
+    finally:
+        proxy.STATE_FILE = old
+
+    assert pool.find("c1").quota["five_hour"]["locked_reason"] == "rejected"
+    assert pool.find("c1").out_of_quota

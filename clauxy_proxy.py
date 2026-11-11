@@ -382,16 +382,19 @@ def load_state(pool):
         account.plan = saved.get("plan") or account.plan
         account.quota = saved.get("quota") or {}
         account.limits = saved.get("limits") or {}
-        # `quota` holds values ALREADY interpreted when they were saved, and
-        # `locked_reason` is the one that decides whether an account may
-        # serve. Restoring it verbatim resurrects the reading of whatever
-        # version wrote the file: a build that took `allowed_warning` for a
-        # lock left a perfectly usable account marked drained across every
-        # later restart, because nothing re-reads it until fresh headers
-        # arrive. `limits` is stored raw, so derive the quota again here and
-        # let today's rules decide.
-        if account.limits:
-            account.quota = quota_from_headers(account.limits) or account.quota
+        # Of everything in `quota`, `locked_reason` is the only field that was
+        # a JUDGEMENT when it was written, and it is the one that decides
+        # whether an account may serve. Restoring it verbatim resurrects the
+        # reading of whatever version wrote the file: a build that took
+        # `allowed_warning` for a lock left a usable account benched across
+        # every later restart, because nothing re-reads it until fresh headers
+        # arrive — and a benched account never gets any. So apply today's rule
+        # to it. Only this field: the utilizations are measurements, and a
+        # probe can have refreshed them past what the stored headers say.
+        for block in account.quota.values():
+            motivo = str(block.get("locked_reason") or "").strip().lower()
+            if motivo.startswith("allowed"):
+                block["locked_reason"] = None
     return True
 
 
@@ -1567,6 +1570,15 @@ def render_panel(snap, sw_page=0, log_page=0):
                         + (f'<small>{esc(limit_message(c["limit_text"])[:160])}'
                            '</small>' if c.get("limit_text") else "")
                         + "</div>")
+        elif (w5["pct"] or 0) >= 100 and w5["in_s"]:
+            # A full hour is just as spent as one a 429 told us about, and the
+            # badge already says DRAINED. Telemetry gets there first most of
+            # the time, so without this the card answered "5-hour window at
+            # 100%, resets in 2h26m" — true, but phrased like a status rather
+            # than the one thing being asked: when does it come back.
+            headline = (f'<div class="reset wait">Back in '
+                        f'<b>{clock(w5["in_s"])}</b>'
+                        '<small>5-hour window spent</small></div>')
         elif w5["in_s"] and (w5["pct"] or 0) > 0:
             headline = (f'<div class="reset">5-hour window at '
                         f'<b>{w5["pct"]:.0f}%</b>, resets in '

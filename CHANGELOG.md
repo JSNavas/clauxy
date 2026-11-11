@@ -48,8 +48,13 @@ All notable changes to this project are documented here. The format follows
   stores `quota` already interpreted, so a file written by the old build kept
   `locked_reason: "allowed_warning"` and put the account back on the bench
   every time the proxy came up — nothing re-reads it until fresh headers
-  arrive, and a bench-sat account never gets any. The raw `limits` are stored
-  too, so the quota is now derived again on load.
+  arrive, and a bench-sat account never gets any. Today's rule is applied to
+  that field on load. Only that field: the utilizations are measurements, and
+  a probe may have refreshed them past what the stored headers say.
+- **A card could say DRAINED and "5-hour window at 100%" at once**, which is
+  true but answers the wrong question. The "Back in ..." banner only fired on
+  a `429`, and telemetry reaches 100% first most of the time, so the account
+  never said when it was coming back. A spent hour now leads with its reset.
 - **The proxy hopped between drained accounts on every request** — a hundred
   switches in minutes, none of which could answer. With nothing usable the
   fallback pick kept naming a different account and `switch_reason` fired
