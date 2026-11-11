@@ -51,6 +51,19 @@ All notable changes to this project are documented here. The format follows
   arrive, and a bench-sat account never gets any. Today's rule is applied to
   that field on load. Only that field: the utilizations are measurements, and
   a probe may have refreshed them past what the stored headers say.
+- **Two accounts held for the same reason read differently.** The banner was
+  written twice: one branch for an account a `429` stopped, printing
+  Anthropic's sentence, and one for an account telemetry caught at 100%,
+  printing ours — so "This request would exceed your account's rate limit"
+  and "5-hour window spent" sat side by side on the same screen saying the
+  same thing. How we found out is not the account's business; which window
+  ran out is. The line now says that, whichever way we learned it, and keeps
+  Anthropic's wording only when it adds something the line does not already
+  carry (a reset date, say).
+- **The proxy would not start at all** if any window had never been read.
+  Those are stored as null rather than as an empty block, and walking the
+  quota to clear a stale verdict assumed a dict: `load_state` raised on boot
+  and left the service stopped.
 - **A card could say DRAINED and "5-hour window at 100%" at once**, which is
   true but answers the wrong question. The "Back in ..." banner only fired on
   a `429`, and telemetry reaches 100% first most of the time, so the account

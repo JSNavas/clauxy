@@ -269,3 +269,28 @@ def test_a_real_lock_survives_the_restart():
 
     assert pool.find("c1").quota["five_hour"]["locked_reason"] == "rejected"
     assert pool.find("c1").out_of_quota
+
+
+def test_a_window_with_no_reading_does_not_kill_the_startup():
+    """A window never read is stored as null, not as an empty block.
+
+    Walking the quota to clear a stale verdict assumed every value was a
+    dict, so `load_state` raised on boot and the proxy stayed stopped — the
+    worst possible failure for a file read before anything can serve.
+    """
+    import json
+    import tempfile
+
+    pool = proxy.Pool([account("c1")])
+    state = {"accounts": {"c1": {"quota": {"five_hour": None,
+                                           "seven_day": {"utilization": 20.0}}}}}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(state, fh)
+        path = fh.name
+
+    old, proxy.STATE_FILE = proxy.STATE_FILE, path
+    try:
+        assert proxy.load_state(pool) is True
+    finally:
+        proxy.STATE_FILE = old
+    assert pool.find("c1").quota["seven_day"]["utilization"] == 20.0

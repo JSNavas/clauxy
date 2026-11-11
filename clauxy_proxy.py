@@ -392,6 +392,11 @@ def load_state(pool):
         # to it. Only this field: the utilizations are measurements, and a
         # probe can have refreshed them past what the stored headers say.
         for block in account.quota.values():
+            # A window with no reading at all is stored as null, not as an
+            # empty block, so this has to tolerate it: assuming a dict here
+            # crashed the proxy on startup and left it stopped.
+            if not isinstance(block, dict):
+                continue
             motivo = str(block.get("locked_reason") or "").strip().lower()
             if motivo.startswith("allowed"):
                 block["locked_reason"] = None
@@ -1559,26 +1564,34 @@ def render_panel(snap, sw_page=0, log_page=0):
         else:
             state, cls = "ready", "idle"
 
-        # What you look at first: when this account comes back.
-        if week_gone:
-            headline = ('<div class="reset wait">Weekly limit reached'
-                        + (f' · back in <b>{clock(w7["in_s"])}</b>'
-                           if w7["in_s"] else "") + "</div>")
-        elif c["waiting_s"]:
-            headline = (f'<div class="reset wait">Back in '
-                        f'<b>{clock(c["waiting_s"])}</b>'
-                        + (f'<small>{esc(limit_message(c["limit_text"])[:160])}'
-                           '</small>' if c.get("limit_text") else "")
-                        + "</div>")
-        elif (w5["pct"] or 0) >= 100 and w5["in_s"]:
-            # A full hour is just as spent as one a 429 told us about, and the
-            # badge already says DRAINED. Telemetry gets there first most of
-            # the time, so without this the card answered "5-hour window at
-            # 100%, resets in 2h26m" — true, but phrased like a status rather
-            # than the one thing being asked: when does it come back.
-            headline = (f'<div class="reset wait">Back in '
-                        f'<b>{clock(w5["in_s"])}</b>'
-                        '<small>5-hour window spent</small></div>')
+        # What you look at first: when this account comes back. Two accounts
+        # held for the same reason used to read differently, because the
+        # banner was written twice: one branch for an account a 429 stopped,
+        # which printed Anthropic's sentence, and one for an account
+        # telemetry caught at 100%, which printed ours. Same state, two
+        # wordings, side by side on the same screen. How we found out is not
+        # the account's business — WHICH WINDOW ran out is, so that is what
+        # the line says, whichever way we learned it.
+        spent = ("weekly" if week_gone
+                 else "five_hour" if (w5["pct"] or 0) >= 100 or c["waiting_s"]
+                 else None)
+        if spent:
+            # The window's own reset is the honest answer; `waiting_s` (a
+            # `retry-after`, or a date parsed out of the 429) only stands in
+            # when telemetry has nothing to say.
+            back = (w7["in_s"] if spent == "weekly" else w5["in_s"]) or c["waiting_s"]
+            why = ("Weekly limit reached" if spent == "weekly"
+                   else "5-hour window spent")
+            # Anthropic's own sentence is kept only when it adds something:
+            # the generic "would exceed your account's rate limit" repeats
+            # the line above it, while "resets Nov 15 at 1am" does not.
+            dicho = esc(limit_message(c["limit_text"] or "")[:160]).strip()
+            if dicho and "resets" in dicho.lower():
+                why += f" · {dicho}"
+            headline = ('<div class="reset wait">'
+                        + (f'Back in <b>{clock(back)}</b>' if back
+                           else '<b>Out of quota</b>')
+                        + f'<small>{why}</small></div>')
         elif w5["in_s"] and (w5["pct"] or 0) > 0:
             headline = (f'<div class="reset">5-hour window at '
                         f'<b>{w5["pct"]:.0f}%</b>, resets in '

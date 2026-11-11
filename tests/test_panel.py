@@ -228,3 +228,40 @@ def test_a_half_spent_hour_still_reads_as_a_status():
     html = proxy.render_panel(pool(account("busy", util_5h=50)).snapshot())
     assert "5-hour window at <b>50%" in html
     assert "Back in" not in html
+
+
+def _banner(html, alias):
+    import re
+    card = [c for c in re.findall(r'<article class="card.*?</article>', html, re.S)
+            if f"\u00b7 {alias}</h2>" in c][0]
+    m = re.search(r'<div class="reset[^"]*">(.*?)</div>', card, re.S)
+    return " ".join(re.sub(r"<[^>]+>", " ", m.group(1)).split())
+
+
+def test_the_same_state_reads_the_same_whichever_way_we_found_out():
+    """One account stopped by a 429, one caught at 100% by telemetry.
+
+    They are held for the same reason and must say the same thing. The banner
+    used to be written twice — Anthropic's sentence on one branch, ours on the
+    other — so the two sat side by side on the panel wording it differently.
+    """
+    by_429 = account("told", util_5h=100)
+    by_429.cooling_until = time.time() + 1500
+    by_429.limit_text = ('{"error":{"message":"This request would exceed your '
+                         'account\'s rate limit. Please try again later."}}')
+    by_telemetry = account("seen", util_5h=100)
+
+    html = proxy.render_panel(pool(by_429, by_telemetry).snapshot())
+    assert "5-hour window spent" in _banner(html, "told")
+    assert "5-hour window spent" in _banner(html, "seen")
+    assert "rate limit" not in _banner(html, "told"), "generic 429 adds nothing"
+
+
+def test_a_429_that_names_the_reset_is_kept():
+    """Only the sentences that say more than the line above them survive."""
+    a = account("dated", util_5h=100)
+    a.cooling_until = time.time() + 1500
+    a.limit_text = ('{"error":{"message":"This request would exceed your '
+                    'weekly limit, resets Nov 15 at 1am"}}')
+    assert "resets Nov 15 at 1am" in _banner(
+        proxy.render_panel(pool(a).snapshot()), "dated")
