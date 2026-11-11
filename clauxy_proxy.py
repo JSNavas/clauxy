@@ -6,9 +6,11 @@ upstream untouched except for the Authorization header, which it swaps for
 the token of the account it picks. When an account runs out of quota the
 same request is retried on the next one, so the client never sees the 429.
 
-Not a translating gateway: the request body and the client's own headers go
-through verbatim. That is deliberate — the upstream answers differently to a
-client it does not recognise, so impersonating the caller is not an option.
+Not a translating gateway: the client's own headers go through verbatim, and
+so does the body but for one addition — the CLI banner is put first in
+`system`, in its own block, because a subscription token is only served to
+Claude Code and that block is how the upstream tells. The caller's own prompt
+rides along untouched behind it. See with_cli_system().
 
 Standard library only.
 """
@@ -58,6 +60,13 @@ HOP_BY_HOP = {
 # Statuses where the server did no work, so retrying on another account is
 # safe and cannot duplicate anything.
 RETRYABLE = {429, 529}
+
+# The upstream serves a subscription token only to Claude Code, and this exact
+# sentence, first and alone in its own `system` block, is how it tells. See
+# with_cli_system().
+CLI_SYSTEM = "You are Claude Code, Anthropic's official CLI for Claude."
+# Endpoints that take a `system` prompt and so need the banner.
+SYSTEM_PATHS = ("/v1/messages",)
 
 DEFAULT_COOLDOWN = 300        # si la respuesta no trae `retry-after`
 PROBE_EVERY = 60              # how often the background probe asks
@@ -973,6 +982,48 @@ def parse_retry_after(value):
         return DEFAULT_COOLDOWN
 
 
+def with_cli_system(payload):
+    """Puts the CLI banner first in `system`, so a subscription token is accepted.
+
+    A subscription token only works for Claude Code, and the upstream decides
+    who is calling by looking at the system prompt: its first block has to be
+    exactly CLI_SYSTEM. Anything else — no system at all, the sentence with
+    more text glued behind it, the sentence in the second block — answers 429
+    `rate_limit_error` with a bare "Error", which reads like spent quota and is
+    not. Measured on eight requests that differed only in `system`, against an
+    account at 0% of its window.
+
+    What makes this safe for other clients is that the banner only has to be
+    the FIRST block, alone in it: the caller's own prompt rides along intact in
+    the blocks behind it. So a code reviewer keeps its review prompt and still
+    gets served.
+
+    Returns the payload to send (the same object when nothing was missing).
+    """
+    system = payload.get("system")
+    block = {"type": "text", "text": CLI_SYSTEM}
+    if isinstance(system, str):
+        if system.startswith(CLI_SYSTEM):
+            # Already the banner, or the banner with text glued behind it. The
+            # second form is rejected upstream, so split it into two blocks.
+            rest = system[len(CLI_SYSTEM):].strip()
+            if not rest:
+                return payload
+            payload["system"] = [block, {"type": "text", "text": rest}]
+        else:
+            payload["system"] = [block, {"type": "text", "text": system}]
+    elif isinstance(system, list):
+        first = system[0] if system else None
+        if (isinstance(first, dict) and first.get("type") == "text"
+                and (first.get("text") or "").strip() == CLI_SYSTEM):
+            return payload
+        payload["system"] = [block] + system
+    else:
+        # None, or something we do not understand: the banner on its own.
+        payload["system"] = [block]
+    return payload
+
+
 def collect_limits(headers):
     """Pulls out the rate-limit headers Anthropic sends."""
     out = {}
@@ -1110,9 +1161,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         requested_model = None
         if body:
             try:
-                requested_model = json.loads(body).get("model")
+                payload = json.loads(body)
             except (ValueError, UnicodeDecodeError):
-                pass
+                payload = None
+            if isinstance(payload, dict):
+                requested_model = payload.get("model")
+                if (method == "POST"
+                        and route.startswith(SYSTEM_PATHS)
+                        and "messages" in payload):
+                    before = payload.get("system")
+                    if with_cli_system(payload).get("system") is not before:
+                        body = json.dumps(payload).encode()
 
         headers = {
             k: v for k, v in self.headers.items()

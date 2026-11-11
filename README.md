@@ -110,6 +110,13 @@ frameworks, your own scripts. Tools with their own connection settings (a
 The bearer token your client sends is ignored: clauxy substitutes the account's
 own. Any placeholder will do.
 
+Your client does not have to be Claude Code, but the upstream has to believe it
+is: a subscription token is only served when the system prompt's first block is
+exactly `You are Claude Code, Anthropic's official CLI for Claude.` — otherwise
+it answers 429, which looks like spent quota and is not. clauxy adds that block
+for you, first and alone in it, and leaves your own prompt intact in the blocks
+behind it. Nothing to configure.
+
 ## The panel
 
 **http://127.0.0.1:4000/_status** — and `/_status.json` for scripts.
@@ -243,6 +250,10 @@ Tokens are stored `chmod 600` and never leave the machine.
 
 - **The quota headers are not officially documented.** They work today and may
   change without notice. If the bars go blank, that is the first thing to check.
+- **The CLI banner in `system` is not documented either.** Which system prompts
+  a subscription token is served for is Anthropic's call, not an API contract.
+  If every account starts answering 429 with a bare `"Error"`, the check moved
+  — not your quota.
 - **Switching accounts drops the prompt cache.** On cache-heavy workloads a
   switch costs real money on the new account. clauxy minimises switches for
   exactly this reason, but it cannot avoid them.

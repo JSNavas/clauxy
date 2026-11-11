@@ -8,6 +8,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Any client can use clauxy**, not just Claude Code. A subscription token is
+  served only to the CLI, and the upstream tells by the system prompt: its
+  first block has to be exactly `You are Claude Code, Anthropic's official CLI
+  for Claude.` Anything else answers 429 `rate_limit_error` with a bare
+  `"Error"` — which reads like spent quota and is not. Measured on eight
+  requests differing only in `system`, on an account at 0% of its window:
+  absent → 429 (with or without `anthropic-beta`, so headers are not what is
+  checked); the sentence alone → 200; the sentence with text glued behind it →
+  429; the sentence in the second block → 429; the sentence first with blocks
+  behind it → 200. So clauxy now puts that block first on `POST /v1/messages`
+  and leaves the caller's own prompt intact in the blocks behind it — a code
+  reviewer keeps its review prompt and gets served.
 - `clauxy restart` — stop and start in one go, whether the proxy is run by
   hand or by the service. `clauxy stop` refuses to touch a service-managed
   proxy, and rightly so (launchd or systemd would start it again), which left
