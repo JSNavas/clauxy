@@ -139,6 +139,13 @@ cannot move out from under a click.
 The switch table survives restarts. Rows with no `FROM` are restarts, not
 switches: nothing was handed over, the proxy simply came up on that account.
 
+An account that cannot serve leads with **when it comes back** and which window
+ran out — `Back in 2h 20m · 5-hour window spent`. It reads the same whether a
+`429` stopped the account or the quota bars reached 100% first, because that is
+a detail of how clauxy found out, not of the account's state. Anthropic's own
+sentence is shown underneath only when it adds something the line does not
+already carry, such as `resets Nov 15 at 1am`.
+
 ### Spend is indicative
 
 On a subscription you do not pay per token. The dollar figures are what the
@@ -272,8 +279,9 @@ Tokens are stored `chmod 600` and never leave the machine.
 ## Prior art
 
 [claude-rotate](https://github.com/doxaras/claude-rotate) does the same job and
-got there first; clauxy borrows its perishable-quota rule, its thresholds and
-its 429 classification. It has features clauxy does not (multi-device keys,
+got there first; clauxy borrows its perishable-quota rule and its 429
+classification, and parts ways on the weekly threshold — it spends that window
+to 100% rather than stopping short of it. It has features clauxy does not (multi-device keys,
 per-device analytics, an OpenAI-compatible gateway) at the cost of a FastAPI
 stack. clauxy trades those for zero dependencies and knowing the state of every
 account from the moment it starts.
