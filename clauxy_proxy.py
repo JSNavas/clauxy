@@ -37,6 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+from html import escape as esc
 from datetime import datetime, timedelta, timezone
 
 if sys.version_info < (3, 10):
@@ -82,7 +83,13 @@ AUDIT_MAX = 500           # requests kept in the in-memory log
 # Switch thresholds, as a % of each window. We move BEFORE hitting the wall:
 # waiting for 100% means spending a 429 just to find out.
 THRESHOLD_5H = 80.0
-THRESHOLD_7D = 98.0
+# The WEEKLY window is the one that is actually lost. Whatever is left in it
+# when the week rolls over is gone, so there is no margin to keep here: an
+# account serves until telemetry says 100%, and `out_of_quota` catches that
+# without needing a 429. Stopping at 98 handed back the last 2% of every
+# subscription, week after week. The hour is different and keeps its margin:
+# it refills, so leaving a little in it costs nothing.
+THRESHOLD_7D = 100.0
 # Hysteresis, so two accounts hovering at the line never ping-pong.
 SWITCH_MARGIN = 5.0           # points the other must win by
 COOLDOWN_S = 300          # minimo entre cambios no forzados
@@ -375,6 +382,16 @@ def load_state(pool):
         account.plan = saved.get("plan") or account.plan
         account.quota = saved.get("quota") or {}
         account.limits = saved.get("limits") or {}
+        # `quota` holds values ALREADY interpreted when they were saved, and
+        # `locked_reason` is the one that decides whether an account may
+        # serve. Restoring it verbatim resurrects the reading of whatever
+        # version wrote the file: a build that took `allowed_warning` for a
+        # lock left a perfectly usable account marked drained across every
+        # later restart, because nothing re-reads it until fresh headers
+        # arrive. `limits` is stored raw, so derive the quota again here and
+        # let today's rules decide.
+        if account.limits:
+            account.quota = quota_from_headers(account.limits) or account.quota
     return True
 
 
@@ -754,6 +771,14 @@ class Pool:
         if candidates:
             return min(candidates, key=lambda a: (a.reset_label("seven_day"),
                                               a._pct("five_hour")))
+        # Nobody is comfortably below the thresholds. An account that is over
+        # them but can still serve beats one that is actually drained: going
+        # by "whose hour resets soonest" alone sent the work to the account on
+        # cooldown, which answers 429 and bounces straight back.
+        serving = [a for a in self.accounts if a.available]
+        if serving:
+            return min(serving, key=lambda a: (a.reset_label("seven_day"),
+                                               a._pct("five_hour")))
         alive = [a for a in self.accounts if not a.paused] or list(self.accounts)
         return min(alive, key=lambda a: a.reset_label("five_hour"))
 
@@ -769,9 +794,13 @@ class Pool:
         if best is current:
             return None
         if not current.available:
-            return "out of quota"
-        if current._pct("seven_day") >= THRESHOLD_7D:
-            return f"weekly >= {THRESHOLD_7D:.0f}%"
+            # Only worth moving if the one we would move TO can actually
+            # serve. When every account is dry this used to fire on every
+            # single request, and since the fallback pick keeps changing its
+            # mind the proxy spent its time hopping between drained accounts
+            # — a hundred switches, not one of them able to answer. Staying
+            # put costs nothing and keeps the log readable.
+            return "out of quota" if best.available else None
         if current.paused:
             return "paused_ a mano"
         # What follows honours the cooldown: these are improvements, not emergencies.
@@ -909,6 +938,22 @@ MESES.update({m: i + 1 for i, m in enumerate(
     "jan feb mar apr may jun jul aug sep oct nov dec".split())})
 
 
+def limit_message(texto):
+    """The sentence a 429 is trying to say, without the JSON around it.
+
+    The body arrives as `{"type":"error","error":{"type":"rate_limit_error",
+    "message":"This request would exceed..."}}`. What a person needs is the
+    message; the envelope only pushes it out of the panel's one line.
+    """
+    try:
+        error = json.loads(texto or "{}").get("error", {})
+        if isinstance(error, dict) and error.get("message"):
+            return error["message"]
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return texto or ""
+
+
 def is_quota_429(texto):
     """Tells a spent-quota 429 from a "you are not the CLI" 429.
 
@@ -923,14 +968,7 @@ def is_quota_429(texto):
     # Look ONLY at the message, never the whole body: the error *type* is
     # `rate_limit_error`, which contains "limit" and would make every 429 look
     # like spent quota.
-    mensaje = texto or ""
-    try:
-        error = json.loads(texto or "{}").get("error", {})
-        if isinstance(error, dict):
-            mensaje = error.get("message") or ""
-    except (ValueError, AttributeError, TypeError):
-        pass
-    bajo = mensaje.strip().lower()
+    bajo = limit_message(texto).strip().lower()
     if bajo in ("", "error"):
         return False
     return any(x in bajo for x in ("limit", "resets", "quota", "usage", "upgrade"))
@@ -1067,7 +1105,14 @@ def quota_from_headers(limits_):
             except (TypeError, ValueError, OSError):
                 pass
         estado = limits_.get(f"unified-{clave}-status")
-        block["locked_reason"] = None if estado in (None, "allowed") else estado
+        # Only a status that actually REFUSES work is a lock. Anthropic also
+        # sends `allowed_warning` as the window fills up, and reading that as
+        # "blocked" took a perfectly good account out of the rotation at ~90%
+        # - leaving the proxy bouncing between accounts that really were
+        # drained. Anything in the `allowed*` family can still serve.
+        estado_s = str(estado).strip().lower() if estado is not None else ""
+        block["locked_reason"] = (
+            None if not estado_s or estado_s.startswith("allowed") else estado)
         out[target] = block
     return out
 
@@ -1221,7 +1266,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 prefetched=body_seen.encode(errors="replace"))
                     return
 
-                account.limit_text = body_seen[:300] or account.limit_text
+                # Store the sentence, not the envelope: the panel shows this.
+                account.limit_text = (limit_message(body_seen)[:300]
+                                      or account.limit_text)
                 _, in_s, _ = account.window("five_hour")
                 wait_s = (seconds_until_reset(body_seen)
                           or in_s
@@ -1461,7 +1508,11 @@ def render_panel(snap, sw_page=0, log_page=0):
     # Rendering the panel picks an account, so `active` alone would claim
     # traffic that never happened. Real requests are the signal.
     started = snap["requests__total"] > 0
-    nxt = next((a for a in queue if a != active), "none free")
+    # Who actually takes over, not merely who is next in the list: in
+    # sequential mode the queue holds every account, drained ones included.
+    free = {c["alias"] for c in snap["accounts"] if c["available_"]}
+    nxt = next((a for a in queue if a != active and a in free),
+               next((a for a in queue if a != active), "none free"))
 
     # The panel does not assume three accounts: it adapts to whatever is loaded.
     total = len(snap["accounts"])
@@ -1494,7 +1545,9 @@ def render_panel(snap, sw_page=0, log_page=0):
             state, cls = "PAUSED", "off"
         elif week_gone:
             state, cls = "WEEKLY LIMIT REACHED", "wait"
-        elif c["waiting_s"] or (w5["pct"] or 0) >= 100:
+        elif c["waiting_s"] or c.get("out_of_quota") or (w5["pct"] or 0) >= 100:
+            # The header counts `out_of_quota` as drained; a card that says
+            # "ready" for the same account contradicts it on the same screen.
             state, cls = "DRAINED", "wait"
         elif not c.get("quota_known") or w5.get("stale") or w7.get("stale"):
             state, cls = "QUOTA UNKNOWN", "idle"
@@ -1511,8 +1564,9 @@ def render_panel(snap, sw_page=0, log_page=0):
         elif c["waiting_s"]:
             headline = (f'<div class="reset wait">Back in '
                         f'<b>{clock(c["waiting_s"])}</b>'
-                        + (f'<small>{c["limit_text"][:90]}</small>'
-                           if c.get("limit_text") else "") + "</div>")
+                        + (f'<small>{esc(limit_message(c["limit_text"])[:160])}'
+                           '</small>' if c.get("limit_text") else "")
+                        + "</div>")
         elif w5["in_s"] and (w5["pct"] or 0) > 0:
             headline = (f'<div class="reset">5-hour window at '
                         f'<b>{w5["pct"]:.0f}%</b>, resets in '

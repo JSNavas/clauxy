@@ -155,12 +155,19 @@ before the reset is gone — so the one about to expire is spent first.
 | Threshold | Default | Why |
 |---|---|---|
 | 5-hour window | 80% | move before the wall, instead of spending a 429 to find it |
-| Weekly window | 98% | same, on the limit that actually runs scarce |
+| Weekly window | 100% | the week does not refill: every percent left is thrown away |
+
+The two differ on purpose. An hour you leave half-spent comes back in five
+hours, so there is no harm in moving early. A week you leave half-spent is
+gone at the reset, so an account serves its weekly window to the last percent
+— telemetry says when it is full, no 429 needed to find out.
 
 **It does not switch on every request**, and that is deliberate: each switch
 throws away the prompt cache, which is where the real cost is. A 5-minute
 cooldown and a 5-point margin keep two accounts near the line from
-ping-ponging. Emergencies skip the cooldown.
+ping-ponging. Emergencies skip the cooldown — but an account is only left for
+one that can actually serve, so when everything is dry the proxy waits where
+it is instead of hopping between exhausted accounts.
 
 `--mode sticky` instead keeps each client on the account its own token maps to,
 borrowing another only when that one runs out.

@@ -174,3 +174,68 @@ def test_the_profile_is_not_fetched_on_every_probe():
     a.email = "someone@example.com"
     a.profile_at = time.time()
     assert proxy.PROFILE_EVERY > proxy.PROBE_EVERY * 60
+
+
+def test_a_warning_status_is_not_a_lock():
+    """`allowed_warning` means "nearly full", not "blocked".
+
+    Reading it as a lock knocked an account that could still serve out of the
+    rotation, and the proxy spent its turns on accounts that really were dry.
+    """
+    q = proxy.quota_from_headers(headers(util_7d="0.93", status_7d="allowed_warning"))
+    assert q["seven_day"]["locked_reason"] is None
+
+    a = account("warned", util_7d=93)
+    a.quota["seven_day"]["locked_reason"] = None
+    assert a.available and a.usable
+
+
+def test_a_refusing_status_is_still_a_lock():
+    q = proxy.quota_from_headers(headers(status_7d="rejected"))
+    assert q["seven_day"]["locked_reason"] == "rejected"
+
+
+def test_the_limit_message_is_read_out_of_the_json_body():
+    """The panel shows this line: it should be the sentence, not the envelope."""
+    body = ('{"type":"error","error":{"type":"rate_limit_error","message":'
+            '"This request would exceed your weekly limit, resets Nov 15 at 1am"}}')
+    assert proxy.limit_message(body).startswith("This request would exceed")
+    assert "rate_limit_error" not in proxy.limit_message(body)
+    # Plain text, or a body that is not the expected shape, passes through.
+    assert proxy.limit_message("usage limit reached") == "usage limit reached"
+    assert proxy.limit_message("") == ""
+    assert proxy.is_quota_429(body)
+
+
+def test_a_restart_re_reads_the_quota_instead_of_trusting_the_file(tmpdir=None):
+    """The saved `quota` carries an OLD build's verdict; `limits` is raw.
+
+    A version that mistook `allowed_warning` for a lock wrote
+    `locked_reason: "allowed_warning"` into the state file. Loading that back
+    verbatim kept the account out of the rotation after every restart, long
+    after the rule was fixed, because nothing re-reads it until fresh headers
+    arrive — and a drained account never gets any.
+    """
+    import json
+    import tempfile
+
+    pool = proxy.Pool([account("c2")])
+    raw = headers(util_5h="0.33", util_7d="0.95", status_7d="allowed_warning")
+    poisoned = proxy.quota_from_headers(raw)
+    poisoned["seven_day"]["locked_reason"] = "allowed_warning"
+
+    state = {"accounts": {"c2": {"limits": raw, "quota": poisoned}}}
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(state, fh)
+        path = fh.name
+
+    old, proxy.STATE_FILE = proxy.STATE_FILE, path
+    try:
+        proxy.load_state(pool)
+    finally:
+        proxy.STATE_FILE = old
+
+    c2 = pool.find("c2")
+    assert c2.quota["seven_day"]["locked_reason"] is None, "the old verdict survived"
+    assert not c2.out_of_quota, "95% weekly is not drained"
+    assert c2.available and c2.usable

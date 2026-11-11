@@ -42,11 +42,12 @@ def test_cooldown_stops_two_accounts_ping_ponging():
 
 
 def test_exhausted_weekly_skips_the_cooldown():
-    p = pool(account("full", util_7d=99), account("free", util_7d=20))
+    """Only a FULL week forces the jump now; 99% is still quota to spend."""
+    p = pool(account("full", util_7d=100), account("free", util_7d=20))
     p.active = "full"
     p.last_switch = time.time()
     assert [x.alias for x in p.order()][0] == "free"
-    assert "weekly" in p.events[0]["reason"]
+    assert "quota" in p.events[0]["reason"]
 
 
 def test_weekly_exhaustion_counts_even_with_a_free_hour():
@@ -82,3 +83,51 @@ def test_startup_is_not_a_switch():
     p.order()
     assert p.failovers == 0
     assert all(a.switches_away == 0 for a in p.accounts)
+
+
+def test_never_sends_work_to_a_drained_account_over_a_live_one():
+    """When nobody is comfortable, serve with whoever can actually answer.
+
+    Picking "whose hour resets soonest" sent every request to the account on
+    cooldown - which answers 429 and bounces back - while an account that was
+    merely over the threshold sat there, able to serve.
+    """
+    dry = account("dry", util_5h=100, reset_5h_h=1)
+    dry.cool_down(2700)
+    hot = account("hot", util_5h=92, reset_5h_h=3, reset_7d_h=40)
+    p = pool(dry, hot)
+    p.active = "dry"
+    assert not dry.available and hot.available
+    assert not hot.usable          # over 80%, but alive
+    assert p.pick().alias == "hot"
+    assert [a.alias for a in p.order()][0] == "hot"
+
+
+def test_the_last_percent_of_the_week_is_not_handed_back():
+    """Weekly quota does not refill: whatever is left when it rolls over is lost."""
+    a = account("nearly", util_5h=10, util_7d=99)
+    assert a.available and a.usable, "99% weekly must still take work"
+    assert not account("done", util_7d=100).usable
+
+
+def test_an_account_with_1_percent_left_still_gets_the_work():
+    """One that can serve beats three that cannot, however little it has left."""
+    dry_a = account("dry_a", util_5h=100, util_7d=10)
+    alive = account("alive", util_5h=99, util_7d=99)
+    dry_b = account("dry_b", util_5h=100, util_7d=20)
+    p = pool(dry_a, alive, dry_b)
+    assert p.pick() is alive
+
+
+def test_all_dry_means_stay_put_instead_of_hopping():
+    """Switching between drained accounts answers nothing and spams the log.
+
+    With every account out of quota the fallback pick kept naming a different
+    one, and `switch_reason` fired "out of quota" on every request: a hundred
+    switches in minutes, none of which could serve.
+    """
+    a, b = account("a", util_5h=100), account("b", util_5h=100)
+    p = pool(a, b)
+    p.active = "a"
+    assert not a.available and not b.available
+    assert p.switch_reason(a, b) is None, "nothing to gain from the hop"

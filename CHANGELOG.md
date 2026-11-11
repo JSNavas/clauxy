@@ -44,6 +44,45 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **A restart resurrected the `allowed_warning` verdict.** The state file
+  stores `quota` already interpreted, so a file written by the old build kept
+  `locked_reason: "allowed_warning"` and put the account back on the bench
+  every time the proxy came up — nothing re-reads it until fresh headers
+  arrive, and a bench-sat account never gets any. The raw `limits` are stored
+  too, so the quota is now derived again on load.
+- **The proxy hopped between drained accounts on every request** — a hundred
+  switches in minutes, none of which could answer. With nothing usable the
+  fallback pick kept naming a different account and `switch_reason` fired
+  "out of quota" each time. Leaving an account that cannot serve is only
+  worth it when the next one can; otherwise it stays put.
+- **The limit line in the panel showed the JSON envelope**, cut mid-word at
+  `{"type":"error","error":{"type":"rate_limit_error","message":"This request
+  would exceed yo`. The 429 body was stored and printed raw. A new
+  `limit_message()` pulls `error.message` out of it — on save and on render,
+  so readings already on disk come out clean too — escaped, and with room for
+  a sentence rather than braces.
+- **An account at 90-something per cent was treated as blocked.** Anthropic
+  sends `unified-7d-status: allowed_warning` as a window fills up; clauxy read
+  anything that was not exactly `allowed` as a lock, marked the account out of
+  quota and dropped it from the rotation. An account with a free hour and 93%
+  of its week left unused was skipped while the proxy ping-ponged between two
+  accounts that really were dry. Only a status that refuses work counts as a
+  lock now; the whole `allowed*` family can still serve.
+- **When nobody was comfortable, the work went to the driest account.** With
+  every account over its threshold, the fallback chose "whose 5-hour window
+  resets soonest" — which is the account on cooldown. It answered 429, the
+  switch bounced back, and an account that was merely over 80% but perfectly
+  able to answer never got a turn. The fallback now prefers whoever can
+  actually serve, and only then whoever revives soonest.
+- The 429 line under **Back in** showed the raw body — `{"type":"error",
+  "error":{"type":"rate_limit_error","message":"This request would exceed yo`
+  — so the envelope ate the line and the sentence was cut off mid-word. The
+  message is pulled out of the JSON now, both where it is stored and where it
+  is drawn (old readings already on disk included), and escaped on the way in.
+- The panel contradicted itself: the header counted an account as drained
+  while its own card said `ready`, and **Next if drained** named the next
+  account in the list even when it was out of quota. Both now read the same
+  availability the rotation does.
 - **Every panel button did nothing.** The form posted
   `action=pause|resume|up|down|probe`; the handler read `accion` with Spanish
   values, so each click fell through to an empty branch and redirected. The
@@ -114,6 +153,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **The weekly window is now spent to 100%**, not 98%. The hour refills; the
+  week does not, so every percent left when it rolls over is thrown away. The
+  5-hour threshold keeps its margin at 80% for exactly that reason — leaving a
+  little in an hour costs nothing.
 - Quota bars show the **wall-clock reset time** in the viewer's own timezone
   ("resets at 9:59 PM") instead of repeating the countdown already in the
   headline.
