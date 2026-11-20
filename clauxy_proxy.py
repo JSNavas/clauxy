@@ -1553,8 +1553,7 @@ def renewal_html(subscription):
         message = f"Falta {days} día" if days == 1 else f"Faltan {days} días"
         css = "wait" if days <= 7 else "ok"
     return (f'<div class="reset {css} subscription">Renovación: '
-            f'<b title="{esc(value)}">{format_renewal(value)}</b> · {message}'
-            '<small>Fecha manual · Informativa, no confirmada por Claude.</small></div>')
+            f'<b title="{esc(value)}">{format_renewal(value)}</b> · {message}</div>')
 
 
 def render_panel(snap, sw_page=0, log_page=0):

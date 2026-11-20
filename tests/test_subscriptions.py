@@ -68,13 +68,13 @@ def test_past_date_is_not_rolled_forward_or_called_expired():
         assert "expired" not in html.lower() and "vencida" not in html.lower()
 
 
-def test_panel_shows_unknown_upcoming_today_and_manual_source():
+def test_panel_shows_unknown_upcoming_and_today_without_extra_disclaimer():
     assert "sin fecha registrada" in proxy.renewal_html(None)
     for days, expected in ((28, "Faltan 28 días"), (1, "Falta 1 día"), (0, "Renueva hoy")):
         html = proxy.renewal_html({"renewal_date": "2026-12-18", "days_remaining": days})
-        assert expected in html and ">18 de diciembre</b>" in html and "Fecha manual" in html
+        assert expected in html and ">18 de diciembre</b>" in html
         assert 'title="2026-12-18"' in html
-        assert "no confirmada por Claude" in html
+        assert "Informativa, no confirmada por Claude" not in html
 
 
 def test_corrupt_metadata_does_not_crash_panel_or_get_overwritten():

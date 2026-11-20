@@ -11,7 +11,7 @@ All notable changes to this project are documented here. The format follows
 - **Manual renewal dates per account.** `clauxy edit <alias> --renewal YYYY-MM-DD`
   records the user's next subscription renewal; `--clear-renewal` removes it.
   Cards show the date, days remaining, today's renewal, or a prompt to confirm
-  a past date, explicitly labeled manual. The confirmation and panel use Spanish
+  a past date. The confirmation and panel use Spanish
   dates such as `29 de noviembre`; commands and storage use ISO dates. Edits
   restart a responding proxy automatically (`--port` supports custom listeners),
   leave stopped proxies stopped, and persist separately in `subscriptions.json`. Dates are validated,
