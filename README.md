@@ -260,6 +260,8 @@ borrowing another only when that one runs out.
 clauxy add <alias>            register an account
 clauxy list                   accounts and labels
 clauxy label <alias> <text>   name an account in the panel
+clauxy edit <alias> --renewal YYYY-MM-DD
+                              set a manual subscription renewal date
 clauxy remove <alias>         forget an account
 
 clauxy start | stop | status  run the proxy by hand
@@ -276,6 +278,33 @@ For a custom port, use `clauxy remove <alias> --port 4099`. A stopped proxy stay
 stopped. Removing an alias already absent from both disk and the live process
 does not restart anything. This removes the account from Clauxy; it does not
 cancel the Claude subscription.
+
+### Manual subscription renewal dates
+
+Record the next renewal date shown in Claude's billing settings for each account:
+
+```bash
+clauxy edit c2 --renewal 2026-12-18   # example: replace with your actual date
+clauxy edit c3 --renewal 2026-12-07   # each account has its own date
+clauxy edit c2 --clear-renewal       # remove a saved date
+```
+
+Dates use `YYYY-MM-DD`; invalid calendar dates and unknown account aliases are
+rejected. The existing panel updates automatically without restarting the proxy.
+This local edit also works while the VPN is disconnected.
+
+Each account card shows the manual date and calendar days remaining, using the
+machine's local date. It says `Renueva hoy` on that date, then asks you to confirm
+the next renewal once it has passed. Dates are never advanced automatically,
+and a passed date never marks a subscription expired or removes it from rotation.
+Without a date, the card says `Renovación: sin fecha registrada`.
+
+These are informational dates supplied by you, not billing data confirmed by
+Claude. They are separate from token expiry and quota resets, persist in
+`~/.clauxy/subscriptions.json` (`CLAUXY_HOME` is respected), and survive proxy
+restarts. Removing an account clears its saved date. Account objects in
+`/_status.json` expose `subscription.renewal_date`, `days_remaining`, and `source`
+(`manual` when configured; otherwise null).
 
 ## Quota for idle accounts
 

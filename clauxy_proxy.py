@@ -43,6 +43,7 @@ from datetime import datetime, timedelta, timezone
 # Resolve sibling modules even when loaded through the CLI symlink or tests.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from clauxy_vpn import VPNUnavailable, require_vpn, vpn_urlopen, vpn_status, watch_vpn
+from clauxy_accounts import subscription_snapshot
 
 if sys.version_info < (3, 10):
     sys.exit(f"clauxy needs Python 3.10 or newer (this is "
@@ -725,6 +726,7 @@ class Account:
             "usd": round(self.usd, 4),
             "email": self.email or LABELS.get(self.alias),
             "plan": self.plan,
+            "subscription": subscription_snapshot(self.alias),
             "window_5h": dict(zip(("pct", "in_s", "locked"), self.window("five_hour")),
                               stale=self.window_stale("five_hour"),
                               at=self.reset_at("five_hour")),
@@ -1535,6 +1537,24 @@ def pager_html(name, page, total, per):
             + "</div>")
 
 
+def renewal_html(subscription):
+    info = subscription or {}
+    value, days = info.get("renewal_date"), info.get("days_remaining")
+    if not value or days is None:
+        return ('<div class="reset unknown subscription">Renovación: sin fecha registrada'
+                '<small>Fecha manual · Usa el comando clauxy edit para añadirla.</small></div>')
+    if days < 0:
+        message = f"Fecha pasada hace {abs(days)} días · Confirma la próxima renovación"
+        css = "wait"
+    elif days == 0:
+        message, css = "Renueva hoy", "wait"
+    else:
+        message = f"Falta {days} día" if days == 1 else f"Faltan {days} días"
+        css = "wait" if days <= 7 else "ok"
+    return (f'<div class="reset {css} subscription">Renovación: <b>{esc(value)}</b> · {message}'
+            '<small>Fecha manual · Informativa, no confirmada por Claude.</small></div>')
+
+
 def render_panel(snap, sw_page=0, log_page=0):
     vpn = snap.get("vpn") or {}
     vpn_labels = {
@@ -1661,6 +1681,8 @@ def render_panel(snap, sw_page=0, log_page=0):
 
   {headline}
 
+  {renewal_html(c.get('subscription'))}
+
   {bar(w5['pct'], '5-hour', reset_label(w5), empty_label(w5, no_telemetry))}
   {bar(w7['pct'], 'Weekly', reset_label(w7), empty_label(w7, no_telemetry))}
 
@@ -1740,6 +1762,7 @@ def render_panel(snap, sw_page=0, log_page=0):
 <tr><td><code>clauxy service install</code></td><td>start on login, restart on crash</td></tr>
 <tr><td><code>clauxy add &lt;alias&gt;</code></td><td>add an account</td></tr>
 <tr><td><code>clauxy label acct-1 you@example.com</code></td><td>set the label shown above</td></tr>
+<tr><td><code>clauxy edit &lt;alias&gt; --renewal YYYY-MM-DD</code></td><td>set the manual subscription renewal date</td></tr>
 <tr><td><code>clauxy list</code></td><td>accounts and labels</td></tr>
 <tr><td><code>clauxy check</code></td><td>try every account with the real CLI</td></tr>
 <tr><td><code>tail -f ~/.clauxy/clauxy.log</code></td><td>the log, when something dies</td></tr>

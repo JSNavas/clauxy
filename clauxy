@@ -4,6 +4,8 @@
     clauxy add <alias>            register an account (runs `claude setup-token`)
     clauxy list                   accounts and labels
     clauxy label <alias> <text>   name an account in the panel
+    clauxy edit <alias> --renewal YYYY-MM-DD
+                                  set the manual subscription renewal date
     clauxy remove <alias>         forget an account
 
     clauxy start | stop | status  run the proxy by hand
@@ -31,6 +33,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from clauxy_vpn import VPNUnavailable, require_vpn, vpn_urlopen
+from clauxy_accounts import parse_renewal, set_renewal
 
 if sys.version_info < (3, 10):
     sys.exit(f"clauxy needs Python 3.10 or newer (this is "
@@ -301,6 +304,18 @@ def cmd_label(args):
     print("restart the proxy to show it in the panel")
 
 
+def cmd_edit(args):
+    if args.alias not in all_accounts():
+        sys.exit(f"unknown account {args.alias!r}; run: clauxy list")
+    try:
+        set_renewal(args.alias, args.renewal)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"could not save renewal date: {exc}")
+    print(f"{args.alias}: renewal {args.renewal} (manual)" if args.renewal
+          else f"{args.alias}: renewal date cleared")
+    print("the panel updates automatically; no restart needed")
+
+
 def cmd_remove(args):
     # The live process keeps tokens in memory. Removing the file alone leaves
     # the account usable until someone remembers to restart it.
@@ -321,6 +336,10 @@ def cmd_remove(args):
             json.dump(labels, fh, indent=2, sort_keys=True)
         gone.append("label")
     print(f"removed {args.alias}: {', '.join(gone) if gone else 'nothing found'}")
+    try:
+        set_renewal(args.alias, None)
+    except (OSError, ValueError) as exc:
+        print(f"could not clear renewal metadata: {exc}", file=sys.stderr)
     if running is not None and (gone or any(
             account["alias"] == args.alias for account in running.get("accounts", []))):
         print("applying account removal to the running proxy...")
@@ -677,6 +696,8 @@ Daily use:
 
 Accounts:
   clauxy label <alias> <text>     name an account in the panel
+  clauxy edit <alias> --renewal YYYY-MM-DD
+                                  set the manual renewal date
   clauxy login <alias>            read quota for accounts with no traffic yet
   clauxy remove <alias>           forget an account
   clauxy check                    try every account with the real Claude CLI
@@ -717,6 +738,20 @@ def main():
     p.add_argument("alias", nargs="?")
     p.add_argument("label", nargs="?")
     p.set_defaults(func=cmd_label)
+
+    def renewal_arg(value):
+        try:
+            return parse_renewal(value).isoformat()
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(str(exc)) from exc
+
+    p = sub.add_parser("edit", help="set or clear a manual subscription renewal date")
+    p.add_argument("alias")
+    renewal = p.add_mutually_exclusive_group(required=True)
+    renewal.add_argument("--renewal", type=renewal_arg, metavar="YYYY-MM-DD")
+    renewal.add_argument("--clear-renewal", dest="renewal", action="store_const", const=None,
+                         help="remove the saved renewal date")
+    p.set_defaults(func=cmd_edit)
 
     p = sub.add_parser("remove", help="forget an account")
     p.add_argument("alias")

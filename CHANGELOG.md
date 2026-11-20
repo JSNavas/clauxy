@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Manual renewal dates per account.** `clauxy edit <alias> --renewal YYYY-MM-DD`
+  records the user's next subscription renewal; `--clear-renewal` removes it.
+  Cards show the date, days remaining, today's renewal, or a prompt to confirm
+  a past date, explicitly labeled manual. Edits appear live without a proxy
+  restart and persist separately in `subscriptions.json`. Dates are validated,
+  never automatically rolled forward, and never affect account rotation.
+  Removing an account clears its renewal metadata. The status API includes
+  the manual date, day count, and source.
 - **Provider-independent VPN protection.** Clauxy checks the destination's
   actual route and requires an active macOS `utun` or Linux TUN/WireGuard
   interface. Every upstream HTTPS socket is bound to that interface before
