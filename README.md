@@ -270,6 +270,13 @@ clauxy check                  try every account with the real Claude CLI
 clauxy login <alias>          optional, see below
 ```
 
+`clauxy remove <alias>` also restarts a responding proxy automatically so the
+removed token is dropped from memory and the account disappears from the panel.
+For a custom port, use `clauxy remove <alias> --port 4099`. A stopped proxy stays
+stopped. Removing an alias already absent from both disk and the live process
+does not restart anything. This removes the account from Clauxy; it does not
+cancel the Claude subscription.
+
 ## Quota for idle accounts
 
 Quota arrives free in the `anthropic-ratelimit-unified-*` headers of every

@@ -73,6 +73,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **Removing an account now applies to the running proxy automatically.**
+  `clauxy remove <alias>` restarts a responding proxy to discard its in-memory
+  token and update the panel; `--port` supports a custom listener. Removing an
+  alias already absent everywhere is a no-op, and stopped proxies stay stopped.
 - **A restart resurrected the `allowed_warning` verdict.** The state file
   stores `quota` already interpreted, so a file written by the old build kept
   `locked_reason: "allowed_warning"` and put the account back on the bench
