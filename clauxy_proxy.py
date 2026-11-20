@@ -1680,9 +1680,10 @@ def render_panel(snap, sw_page=0, log_page=0):
     <span class="state {cls}">{state}</span>
   </header>
 
-  {headline}
-
-  {renewal_html(c.get('subscription'))}
+  <div class="account-summary">
+    {headline}
+    {renewal_html(c.get('subscription'))}
+  </div>
 
   {bar(w5['pct'], '5-hour', reset_label(w5), empty_label(w5, no_telemetry))}
   {bar(w7['pct'], 'Weekly', reset_label(w7), empty_label(w7, no_telemetry))}
@@ -1874,6 +1875,9 @@ tr.muted td{{color:var(--mut)}}
 .reset.ok{{color:var(--ok)}}
 .reset.unknown{{color:var(--mut)}}
 .reset small{{display:block;color:var(--mut);font-size:11px;margin-top:3px}}
+.account-summary{{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px 20px;
+background:var(--bg);border-radius:8px;padding:9px 12px;margin:0 0 12px}}
+.account-summary>.reset{{background:transparent;padding:0;margin:0}}
 </style>
 <div id=live data-sw="{sw_page}" data-log="{log_page}">
 <div class=top>
