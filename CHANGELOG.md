@@ -59,8 +59,8 @@ All notable changes to this project are documented here. The format follows
   instead, and a page out of range is clamped rather than left blank.
 - The panel **updates itself every second** instead of reloading whole every
   ten. It re-fetches only the part that changes, pauses in a background tab,
-  and will not redraw while the cursor is inside it, so a button cannot move
-  out from under a click.
+  and protects active clicks and editable fields without freezing on a focused
+  button.
 - Sign-ins **renew themselves**. The session token expires in hours, the
   refresh token lasts weeks, and only the Claude CLI is allowed to trade one
   for the other — so clauxy asks it to: a throwaway prompt against that
@@ -89,6 +89,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The status panel could stop updating after a button kept focus.** Focused
+  buttons no longer pause polling indefinitely. Real clicks and editable fields
+  stay protected; returning to a visible tab refreshes immediately. Failed and
+  timed-out polls show `Reconectando…` and retry after a proxy restart without a
+  manual page reload. Polls do not overlap, stale responses cannot undo pager
+  actions, and status responses disable caching. Browser-script behavior is
+  covered by an executable Node test in CI.
 - **Removing an account now applies to the running proxy automatically.**
   `clauxy remove <alias>` restarts a responding proxy to discard its in-memory
   token and update the panel; `--port` supports a custom listener. Removing an

@@ -20,6 +20,10 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Tests
         run: python3 tests/run.py
+      - name: Panel refresh behavior
+        run: |
+          python3 -c 'import sys; sys.path.insert(0, "tests"); from helpers import account, pool, load; print(load().render_panel(pool(account("demo")).snapshot()))' > "$RUNNER_TEMP/clauxy-panel.html"
+          node tests/test_panel_refresh.js < "$RUNNER_TEMP/clauxy-panel.html"
       - name: Both entry points parse
         run: |
           python3 -m py_compile clauxy clauxy_proxy.py clauxy_vpn.py clauxy_accounts.py

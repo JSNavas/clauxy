@@ -14,6 +14,12 @@ There is nothing to build and nothing to install. If `python3 tests/run.py`
 passes, the offline checks pass. The VPN tests fake DNS, routes, interfaces,
 and sockets; they never disconnect your real VPN or contact Anthropic.
 
+CI also executes `tests/test_panel_refresh.js` with Node.js against the script
+emitted by the Python renderer. It covers polling, focused controls, connection
+recovery, timeouts, paging, tab visibility, and preservation of an open dialog.
+Node is a development test tool; running Clauxy still requires only Python and
+the operating system's route tools.
+
 To try it against a live account you need the
 [Claude CLI](https://claude.com/claude-code) on your PATH, at least one
 subscription, and an active VPN routing the upstream API through a supported

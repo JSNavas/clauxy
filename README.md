@@ -208,8 +208,12 @@ it is not showing.
 **It updates itself every second.** The page re-fetches only the part that
 changes, so the account marked `IN USE` is the one serving right now rather
 than the one that was serving up to ten seconds ago. It pauses while the tab is
-in the background, and will not redraw while your cursor is in it, so a button
-cannot move out from under a click.
+in the background and refreshes immediately when you return. An active click or
+an editable field is preserved; leaving a button focused does not freeze updates.
+During a proxy restart it shows `Reconectando…` and retries automatically, with
+a five-second timeout for stuck polls. No page reload is needed after account
+changes. After an upgrade that changes the browser script, reload an already-open
+tab once to load that script; subsequent proxy restarts recover automatically.
 
 The switch table survives restarts. Rows with no `FROM` are restarts, not
 switches: nothing was handed over, the proxy simply came up on that account.

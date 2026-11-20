@@ -135,6 +135,17 @@ def test_the_panel_refreshes_itself_without_a_reload():
     assert 'id=live' in html and "setInterval(tick, 1000)" in html
 
 
+def test_status_responses_disable_caching():
+    import io
+    handler = object.__new__(proxy.Handler)
+    handler.wfile = io.BytesIO()
+    with patch.object(handler, "send_response"), \
+            patch.object(handler, "send_header") as header, \
+            patch.object(handler, "end_headers"):
+        handler._envia(b"{}", "application/json")
+        header.assert_any_call("Cache-Control", "no-store")
+
+
 def test_spend_reads_like_money():
     """"$5.3123" is not a dollar amount anyone writes."""
     assert proxy.money(5.3123) == "$5.31"

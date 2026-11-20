@@ -1161,6 +1161,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _envia(self, body, ctype, status=200):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1893,7 +1894,7 @@ tr.muted td{{color:var(--mut)}}
   <div><span>Strategy</span><b>{snap.get('mode','?')}</b>
        <i class=hint>{f"switch at {THRESHOLD_5H:.0f}% · spend perishable first" if snap.get('mode')=='sequential' else 'each client keeps its own'}</i></div>
 </div>
-<p class=sub>Up for {clock(snap['started_s_ago'])} · live</p>
+<p class=sub>Up for {clock(snap['started_s_ago'])} · <span id="live-state" role="status">live</span></p>
 
 {commands}
 
@@ -1925,6 +1926,12 @@ compare accounts against each other. The quota bars are the real limit.</p>
   // history there is — the rest is fetched when you ask for it.
   var live0 = document.getElementById('live');
   var pages = {{sw: +live0.dataset.sw || 0, log: +live0.dataset.log || 0}};
+  var pending = false;
+  var refreshAgain = false;
+  var pointerDown = false;
+  document.addEventListener('pointerdown', function () {{ pointerDown = true; }});
+  document.addEventListener('pointerup', function () {{ pointerDown = false; }});
+  document.addEventListener('pointercancel', function () {{ pointerDown = false; }});
 
   function pager() {{
     document.querySelectorAll('[data-page]').forEach(function (b) {{
@@ -1955,17 +1962,25 @@ compare accounts against each other. The quota bars are the real limit.</p>
   function tick(asked) {{
     var live = document.getElementById('live');
     if (!asked) {{
-      // Never redraw out from under a button the user is about to press, or
-      // a dialog they are reading past the first line. A click on the pager
-      // is not an interruption, though — it is the whole point.
+      // Protect a click in progress and editable fields. A focused button is
+      // not an ongoing edit: it can stay focused forever after a click.
       if (document.hidden) {{ return; }}
+      if (pointerDown) {{ return; }}
       var focus = document.activeElement;
-      if (focus && focus !== document.body && live.contains(focus)) {{ return; }}
+      if (focus && live.contains(focus) && (focus.isContentEditable ||
+          (/^(INPUT|TEXTAREA|SELECT)$/.test(focus.tagName) && focus.type !== 'hidden'))) {{ return; }}
     }}
-    fetch(query(), {{cache: 'no-store'}})
-      .then(function (r) {{ return r.ok ? r.text() : null; }})
+    if (pending) {{ if (asked) {{ refreshAgain = true; }} return; }}
+    pending = true;
+    var controller = new AbortController();
+    var timeout = setTimeout(function () {{ controller.abort(); }}, 5000);
+    fetch(query(), {{cache: 'no-store', signal: controller.signal}})
+      .then(function (r) {{
+        if (!r.ok) {{ throw new Error('status unavailable'); }}
+        return r.text();
+      }})
       .then(function (html) {{
-        if (!html) {{ return; }}
+        if (!html || refreshAgain) {{ return; }}
         var fresh = new DOMParser().parseFromString(html, 'text/html')
                         .getElementById('live');
         if (!fresh) {{ return; }}
@@ -1980,10 +1995,23 @@ compare accounts against each other. The quota bars are the real limit.</p>
         pages.log = +fresh.dataset.log || 0;
         wire(wasOpen);
       }})
-      .catch(function () {{}});   // the proxy restarting is not worth a stack trace
+      .catch(function () {{
+        var state = document.getElementById('live-state');
+        if (state) {{ state.textContent = 'Reconectando…'; }}
+      }})
+      .finally(function () {{
+        clearTimeout(timeout);
+        pending = false;
+        if (refreshAgain) {{ refreshAgain = false; tick(true); }}
+      }});
   }}
 
   wire(false);
+  document.addEventListener('visibilitychange', function () {{
+    if (!document.hidden) {{ tick(); }}
+  }});
+  window.addEventListener('focus', function () {{ pointerDown = false; tick(); }});
+  window.addEventListener('blur', function () {{ pointerDown = false; }});
   setInterval(tick, 1000);
 }})();
 </script>
