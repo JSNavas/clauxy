@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Provider-independent VPN protection.** Clauxy checks the destination's
+  actual route and requires an active macOS `utun` or Linux TUN/WireGuard
+  interface. Every upstream HTTPS socket is bound to that interface before
+  connecting, with no fallback to an ordinary network interface. IPv4 and
+  IPv6 routes are checked separately; addresses outside the tunnel are not
+  used. Quota/profile traffic uses the same transport. No Windscribe CLI or
+  provider firewall setting is required.
+- **Live VPN status in the statistics panel and CLI.** The panel shows
+  `Online` and the verified interface, `VPN desconectada`, or
+  `VPN sin verificar`. Background route checks run every two seconds;
+  the panel updates every second and marks checks older than ten seconds
+  unverified. `/_status.json` includes the VPN state, interface, timestamp,
+  and diagnostic detail. API requests blocked by the VPN guard return 503;
+  the local panel stays available and new requests resume when a verified
+  route returns.
+
 - **Any client can use clauxy**, not just Claude Code. A subscription token is
   served only to the CLI, and the upstream tells by the system prompt: its
   first block has to be exactly `You are Claude Code, Anthropic's official CLI
@@ -41,6 +57,19 @@ All notable changes to this project are documented here. The format follows
   account's config dir, with `ANTHROPIC_*` scrubbed so it does not come back
   through the proxy. A drained account renews too; the limit message arrives
   after the renewal. At most one attempt per account every 10 minutes.
+
+### Changed
+
+- **A valid VPN route is now required for outbound API traffic.** Unsupported
+  systems, unavailable route tools, unknown routes, failed tunnel binding,
+  private upstream destinations, and non-HTTPS upstream URLs fail closed.
+  System/environment HTTP proxies are ignored and upstream redirects are
+  blocked. Linux needs iproute2 and permission to bind sockets to a device.
+- External Claude CLI commands require a verified API route before launch.
+  Their sockets and browser sign-in remain outside Python's bound transport;
+  complete protection for these processes requires the VPN's system-level
+  policy. DNS continues to use the system resolver. Tunnel detection verifies
+  routing, not provider identity or encryption.
 
 ### Fixed
 

@@ -11,11 +11,14 @@ python3 tests/run.py          # no pytest, no install step
 ```
 
 There is nothing to build and nothing to install. If `python3 tests/run.py`
-passes, you have a working checkout.
+passes, the offline checks pass. The VPN tests fake DNS, routes, interfaces,
+and sockets; they never disconnect your real VPN or contact Anthropic.
 
 To try it against a live account you need the
-[Claude CLI](https://claude.com/claude-code) on your PATH and at least one
-subscription:
+[Claude CLI](https://claude.com/claude-code) on your PATH, at least one
+subscription, and an active VPN routing the upstream API through a supported
+tunnel. Runtime VPN checks support macOS `utun` and Linux TUN/WireGuard;
+Linux requires iproute2 and socket-to-device binding permission:
 
 ```bash
 CLAUXY_HOME=/tmp/clauxy-dev ./clauxy add test-1
@@ -26,8 +29,9 @@ CLAUXY_HOME=/tmp/clauxy-dev ./clauxy start --port 4099
 
 ## The one hard rule: no dependencies
 
-clauxy is standard library only, on purpose. It runs where Python runs, with no
-virtualenv, no lockfile and nothing to audit. A patch that adds a dependency
+clauxy is Python standard library only, on purpose, with no virtualenv or
+lockfile. Runtime route checks use the operating system's tools (`route` and
+`ifconfig` on macOS, iproute2 on Linux). A patch that adds a Python dependency
 will be turned down unless it removes more complexity than it adds.
 
 ## Style
@@ -40,6 +44,12 @@ will be turned down unless it removes more complexity than it adds.
 
 ## Things to know before changing the hot path
 
+- **Keep upstream transport inside the VPN guard.** Use `vpn_urlopen` from
+  `clauxy_vpn.py`, which checks each destination route and binds the actual
+  socket before connecting. Never add an unbound/direct retry when a tunnel
+  fails. Preserve TLS verification and the original hostname. The panel's
+  cached VPN state must never authorize a connection. Keep the display and
+  security documentation accurate about DNS and external CLI/browser limits.
 - **Requests pass through untouched.** Only the `Authorization` header is
   swapped. The upstream answers differently to a client it does not recognise,
   so the caller's own headers and body must survive verbatim.

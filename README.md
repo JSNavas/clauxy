@@ -11,7 +11,7 @@ Point any Claude-compatible tool at `http://127.0.0.1:4000` and clauxy serves
 every request from whichever of your accounts has quota. When one runs out, the
 **same request** is retried on the next one — the client never sees the 429.
 
-Zero dependencies. One Python file and a CLI, standard library only.
+Python standard library only. A proxy, a CLI, and a shared VPN guard.
 
 ```
    your tools (Claude Code, an IDE, an agent framework, a script)
@@ -35,8 +35,83 @@ clauxy pools them behind one URL and picks for you.
 
 ## Install
 
-Requires Python 3.10+ and the [Claude CLI](https://claude.com/claude-code) on
-your PATH.
+Requires Python 3.10+, the [Claude CLI](https://claude.com/claude-code) on
+your PATH, and a VPN that routes the upstream API through an active tunnel.
+
+### Required VPN protection
+
+Protection is independent of the VPN provider. On macOS clauxy checks the actual
+route for each resolved destination IP using `route`, and requires an active
+`utun` interface. On Linux it uses iproute2 (`ip -j`) and requires an active
+TUN or WireGuard interface. Other systems fail closed for now.
+
+Every upstream HTTPS socket is bound to its verified tunnel **before connecting**
+(`IP_BOUND_IF` / `IPV6_BOUND_IF` on macOS, `SO_BINDTODEVICE` on Linux). If the
+route changes, binding fails, or the tunnel drops, clauxy never retries over an
+ordinary interface. IPv6 addresses routed outside the VPN are excluded even
+when IPv4 has a valid tunnel route. Linux accounts need permission to bind to a
+network device; a permission failure blocks the request.
+
+API traffic, quota, and profile requests use this transport, with TLS certificate
+and hostname verification. System/environment HTTP proxies are ignored and
+redirects are blocked. `CLAUXY_UPSTREAM` must be a public HTTPS destination.
+DNS uses the system resolver; configure VPN DNS if DNS privacy is required.
+
+The panel shows **Online** when a destination route through the tunnel is
+verified, or **VPN desconectada / VPN sin verificar** when it cannot be used.
+It refreshes independently of traffic. Blocked API requests receive HTTP 503;
+the local panel remains available. New requests resume when a valid route returns.
+Online describes the verified route, not the health of Anthropic or proof of
+the tunnel provider's encryption. No provider CLI or firewall setting is required,
+and clauxy never changes VPN settings.
+
+Commands launching the external Claude CLI (sign-in, token checks, and session
+renewal) also require a verified API route before launch. Those external processes
+and browser sign-in do not use Python's bound-socket transport: their complete
+traffic protection requires the VPN's system-level routing/kill switch. Do not
+exclude them or Python with application-based split tunneling.
+
+#### Checking the VPN state
+
+Connect your VPN, then use `clauxy status` or open
+[`http://127.0.0.1:4000/_status`](http://127.0.0.1:4000/_status).
+The background check runs every two seconds, and the panel refreshes every second.
+Checks older than ten seconds are displayed as unverified. Each outbound
+connection checks its own destination again, independently of the display.
+
+`GET /_status.json` also exposes the state for local monitoring:
+
+```json
+{
+  "vpn": {
+    "state": "connected",
+    "allowed": true,
+    "checked_at": 1795163061.5,
+    "interface": "utun420",
+    "detail": "Ruta al destino verificada por el túnel VPN"
+  }
+}
+```
+
+This is an excerpt of the response. `checked_at` is a Unix timestamp in seconds.
+`allowed` describes the last route check, not a permanent authorization for
+future connections. Interface names vary by machine and provider.
+
+| Panel state | Meaning / action |
+|---|---|
+| Online | A public upstream address has a verified active tunnel route. |
+| VPN desconectada | No usable tunnel route, or a tunnel connection failed. Connect the VPN and check its routes to the upstream API. |
+| VPN sin verificar | Verification is unavailable or stale. Inspect `vpn.detail` and the Clauxy log; check route-tool permissions and DNS. |
+
+Split tunneling can leave the API outside the VPN even while the VPN app says
+connected. A tunnel merely existing is not enough. On Linux, verify iproute2 is
+installed and the service account can use `SO_BINDTODEVICE`. A VPN implemented
+only as a browser extension or HTTP proxy does not satisfy this guard.
+
+After upgrading a running checkout, run `clauxy restart` to load the new code.
+There is no build step. Restarting does not change VPN or firewall settings.
+
+### Set up accounts
 
 ```bash
 git clone https://github.com/JSNavas/clauxy.git

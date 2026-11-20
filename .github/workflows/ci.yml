@@ -22,5 +22,5 @@ jobs:
         run: python3 tests/run.py
       - name: Both entry points parse
         run: |
-          python3 -m py_compile clauxy clauxy_proxy.py
+          python3 -m py_compile clauxy clauxy_proxy.py clauxy_vpn.py
           python3 clauxy --help > /dev/null

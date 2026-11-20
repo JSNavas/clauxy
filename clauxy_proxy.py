@@ -40,6 +40,10 @@ import zlib
 from html import escape as esc
 from datetime import datetime, timedelta, timezone
 
+# Resolve sibling modules even when loaded through the CLI symlink or tests.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+from clauxy_vpn import VPNUnavailable, require_vpn, vpn_urlopen, vpn_status, watch_vpn
+
 if sys.version_info < (3, 10):
     sys.exit(f"clauxy needs Python 3.10 or newer (this is "
              f"{sys.version_info.major}.{sys.version_info.minor}).")
@@ -272,6 +276,10 @@ def renew_session(alias):
     proxy they would send this through clauxy itself, which serves it with the
     long-lived work token and renews nothing.
     """
+    try:
+        require_vpn()
+    except VPNUnavailable:
+        return None
     binary = claude_cli()
     # Realpath, like session_credential: the Keychain entry is keyed by the
     # folder the CLI resolves to, and handed the symlink it reports "not
@@ -628,6 +636,11 @@ class Account:
             self.quota_error = (
                 f"too many quota checks - retrying in {clock(self.probe_wait)}")
             return
+        try:
+            require_vpn()
+        except VPNUnavailable as exc:
+            self.quota_error = str(exc)
+            return
         self.session_expired = False
         credential = self.session_token() or self.token
         error = None
@@ -641,7 +654,7 @@ class Account:
             req.add_header("Authorization", "Bearer " + credential)
             req.add_header("anthropic-beta", "oauth-2025-04-20")
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with vpn_urlopen(req, timeout=30) as resp:
                     item = json.loads(resp.read())
             except urllib.error.HTTPError as exc:
                 # Not an error: a work token simply cannot read telemetry.
@@ -1152,6 +1165,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _panel(self, as_json, query=None):
         snap = self.pool.snapshot()
+        snap["vpn"] = vpn_status()
         if as_json:
             self._envia(json.dumps(snap, indent=2).encode(),
                         "application/json; charset=utf-8")
@@ -1209,6 +1223,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._control()
             return
 
+        try:
+            require_vpn()
+        except VPNUnavailable as exc:
+            self.send_error(503, str(exc))
+            self.close_connection = True
+            return
+
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         requested_model = None
@@ -1236,9 +1257,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # The account the client brought wins, while it can still serve.
         preferred = self.pool.account_for_token(self.headers.get("Authorization"))
         for account in self.pool.order(preferred):
-            status, resp_headers, stream, error = self._attempt(
-                method, headers, body, account,
-            )
+            try:
+                status, resp_headers, stream, error = self._attempt(
+                    method, headers, body, account,
+                )
+            except VPNUnavailable as exc:
+                self.send_error(503, str(exc))
+                return
             if error is not None:
                 tried.append(f"{account.alias}:{error}")
                 continue
@@ -1321,8 +1346,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         request.add_header("Authorization", "Bearer " + account.token)
         request.add_header("Host", "api.anthropic.com")
         try:
-            resp = urllib.request.urlopen(request, timeout=900)
+            resp = vpn_urlopen(request, timeout=900)
             return resp.status, resp.headers, resp, None
+        except VPNUnavailable:
+            raise
         except urllib.error.HTTPError as exc:
             # An HTTPError is still a response with a body: this is how the
             # 429 arrives.
@@ -1509,6 +1536,15 @@ def pager_html(name, page, total, per):
 
 
 def render_panel(snap, sw_page=0, log_page=0):
+    vpn = snap.get("vpn") or {}
+    vpn_labels = {
+        "connected": ("Online", "Ruta por VPN verificada · Conexiones vinculadas al túnel"),
+        "disconnected": ("VPN desconectada", "Peticiones bloqueadas · No hay una ruta VPN válida al destino"),
+        "unknown": ("VPN sin verificar", "Peticiones bloqueadas · No se pudo verificar el túnel"),
+    }
+    vpn_title, vpn_detail = vpn_labels.get(vpn.get("state"), vpn_labels["unknown"])
+    vpn_class = "on" if vpn.get("state") == "connected" and vpn.get("allowed") else "off"
+    vpn_detail += (" · " + esc(vpn["interface"])) if vpn.get("interface") else ""
     queue = snap.get("queue") or [c["alias"] for c in snap["accounts"] if c["available_"]]
     # Before the first request there is no "active" account: show the one that
     # will serve, which is what you want to know when you open the panel.
@@ -1821,6 +1857,10 @@ tr.muted td{{color:var(--mut)}}
   <div class=val><b>{money(snap['usd_total'])}</b> · {snap['requests__total']} requests
    · {snap['switches']} switches</div>
 </div>
+<div id="vpn-status" role="status" aria-live="polite" class="reset {('ok' if vpn_class == 'on' else 'err')}">
+  <span class="state {vpn_class}">{vpn_title}</span>
+  <small>{vpn_detail}</small>
+</div>
 <div class=now>
   <div><span>Accounts</span><b>{total}</b><i class=hint>{summary}</i></div>
   <div><span>Current account</span><b>{active or '—'}</b>
@@ -1997,6 +2037,7 @@ def probe(pool, port):
         if not os.path.isdir(cfg):
             cfg = os.path.join(HOME, "sessions", "_probe")
         os.makedirs(cfg, exist_ok=True)
+        require_vpn()
         run = subprocess.run(
             ["claude", "-p", "di OK", "--model", "claude-haiku-5-5"],
             env={**os.environ, "ANTHROPIC_BASE_URL": base,
@@ -2101,6 +2142,7 @@ def main():
               + (f" · on hold: {', '.join(waiting)}" if waiting else ""))
 
     threading.Thread(target=watch_quotas, args=(pool,), daemon=True).start()
+    threading.Thread(target=watch_vpn, daemon=True).start()
     threading.Thread(target=save_periodically, args=(pool,), daemon=True).start()
 
     Handler.pool = pool

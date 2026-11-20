@@ -3,10 +3,36 @@
 import os
 import re
 import time
+from unittest.mock import patch
 
 from helpers import account, load, pool
 
 proxy = load()
+
+
+def test_panel_explains_vpn_blocks_and_connection():
+    snap = pool(account("a")).snapshot()
+    for state, allowed, title, detail in (
+        ("disconnected", False, "VPN desconectada", "Peticiones bloqueadas"),
+        ("unknown", False, "VPN sin verificar", "Peticiones bloqueadas"),
+        ("connected", True, "Online", "Ruta por VPN verificada"),
+    ):
+        snap["vpn"] = {"state": state, "allowed": allowed}
+        html = proxy.render_panel(snap)
+        assert 'id="vpn-status"' in html
+        assert title in html and detail in html
+        assert ('class="state on"' if allowed else 'class="state off"') in html
+
+
+def test_status_json_includes_vpn_without_waiting_for_cli():
+    import json
+    handler = object.__new__(proxy.Handler)
+    handler.pool = pool(account("a"))
+    status = {"state": "disconnected", "allowed": False, "checked_at": 123}
+    with patch.object(proxy, "vpn_status", return_value=status), \
+            patch.object(handler, "_envia") as send:
+        handler._panel(True)
+        assert json.loads(send.call_args.args[0])["vpn"] == status
 
 
 def _cards(html):
