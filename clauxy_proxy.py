@@ -1875,7 +1875,7 @@ tr.muted td{{color:var(--mut)}}
 .reset.ok{{color:var(--ok)}}
 .reset.unknown{{color:var(--mut)}}
 .reset small{{display:block;color:var(--mut);font-size:11px;margin-top:3px}}
-.account-summary{{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px 20px;
+.account-summary{{display:flex;flex-direction:column;align-items:flex-start;gap:5px;
 background:var(--bg);border-radius:8px;padding:9px 12px;margin:0 0 12px}}
 .account-summary>.reset{{background:transparent;padding:0;margin:0}}
 </style>

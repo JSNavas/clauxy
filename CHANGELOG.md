@@ -18,8 +18,8 @@ All notable changes to this project are documented here. The format follows
   never automatically rolled forward, and never affect account rotation.
   Removing an account clears its renewal metadata. The status API includes
   the manual date, day count, and source.
-- Quota status and renewal information share one compact row in each account
-  card, wrapping only when the viewport is too narrow.
+- Quota status and renewal information share one compact block in each account
+  card, with a line break between them.
 - **Provider-independent VPN protection.** Clauxy checks the destination's
   actual route and requires an active macOS `utun` or Linux TUN/WireGuard
   interface. Every upstream HTTPS socket is bound to that interface before
