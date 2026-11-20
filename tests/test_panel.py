@@ -13,15 +13,28 @@ proxy = load()
 def test_panel_explains_vpn_blocks_and_connection():
     snap = pool(account("a")).snapshot()
     for state, allowed, title, detail in (
-        ("disconnected", False, "VPN desconectada", "Peticiones bloqueadas"),
-        ("unknown", False, "VPN sin verificar", "Peticiones bloqueadas"),
-        ("connected", True, "Online", "Ruta por VPN verificada"),
+        ("disconnected", False, "VPN disconnected", "Requests blocked"),
+        ("unknown", False, "VPN unverified", "Requests blocked"),
+        ("connected", True, "Online", "VPN route verified"),
     ):
         snap["vpn"] = {"state": state, "allowed": allowed}
         html = proxy.render_panel(snap)
         assert 'id="vpn-status"' in html
         assert title in html and detail in html
         assert ('class="state on"' if allowed else 'class="state off"') in html
+
+
+def test_renewal_and_saved_switch_reasons_display_in_english():
+    p = pool(account("first"), account("second"))
+    p.record_switch(p.find("first"), p.find("second"), "la otra caduca antes")
+    snap = p.snapshot()
+    snap["accounts"][0]["subscription"] = {
+        "renewal_date": "2026-11-29", "days_remaining": 9, "source": "manual"}
+    html = proxy.render_panel(snap)
+    assert "Renewal:" in html and "November 29" in html and "9 days left" in html
+    assert "the other account's quota resets sooner" in html
+    assert "la otra caduca antes" not in html
+    assert "Renovación" not in html and "noviembre" not in html
 
 
 def test_status_json_includes_vpn_without_waiting_for_cli():

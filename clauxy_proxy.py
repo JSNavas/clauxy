@@ -351,7 +351,7 @@ def save_state(pool):
             json.dump(datos, fh)
         os.replace(tmp, STATE_FILE)
     except OSError as exc:
-        sys.stderr.write(f"[proxy] no pude guardar el estado: {exc}\n")
+        sys.stderr.write(f"[proxy] could not save state: {exc}\n")
 
 
 def load_state(pool):
@@ -825,7 +825,7 @@ class Pool:
             # put costs nothing and keeps the log readable.
             return "out of quota" if best.available else None
         if current.paused:
-            return "paused_ a mano"
+            return "manually paused"
         # What follows honours the cooldown: these are improvements, not emergencies.
         if time.time() - self.last_switch < COOLDOWN_S:
             return None
@@ -833,7 +833,7 @@ class Pool:
                 and best._pct("five_hour") <= current._pct("five_hour") - SWITCH_MARGIN):
             return f"5h >= {THRESHOLD_5H:.0f}%"
         if best.reset_label("seven_day") < current.reset_label("seven_day") - PERISHABLE_MARGIN_S:
-            return "la otra caduca antes"
+            return "the other account's quota resets sooner"
         return None
 
     #: What the panel's buttons may ask for. The form in `render_panel`
@@ -1148,7 +1148,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def handle_error(self, request, client_address):
         # The default prints the traceback and carries on; make it explicit
         # so it lands in the log with a timestamp.
-        sys.stderr.write(f"[proxy] error sirviendo a {client_address}:\n")
+        sys.stderr.write(f"[proxy] error serving {client_address}:\n")
         traceback.print_exc()
         sys.stderr.flush()
 
@@ -1293,7 +1293,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     # would answer the same, so pass it through without
                     # touching pool state.
                     sys.stderr.write(
-                        f"[proxy] {account.alias} dio {status} generico "
+                        f"[proxy] {account.alias} returned generic {status} "
                         f"(client not recognised): not quota, not switching\n")
                     with self.pool.lock:
                         self.pool.active = account.alias
@@ -1324,7 +1324,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "tokens": None, "usd": None,
                 })
                 sys.stderr.write(
-                    f"[proxy] {account.alias} dio {status}: en wait_s "
+                    f"[proxy] {account.alias} returned {status}: waiting for "
                     f"{int(wait_s)}s -> switching to the next account\n"
                 )
                 threading.Thread(target=account.probe_quota, daemon=True).start()
@@ -1542,26 +1542,27 @@ def renewal_html(subscription):
     info = subscription or {}
     value, days = info.get("renewal_date"), info.get("days_remaining")
     if not value or days is None:
-        return ('<div class="reset unknown subscription">Renovación: sin fecha registrada'
-                '<small>Fecha manual · Usa el comando clauxy edit para añadirla.</small></div>')
+        return ('<div class="reset unknown subscription">Renewal: no date set'
+                '<small>Set it with clauxy edit.</small></div>')
     if days < 0:
-        message = f"Fecha pasada hace {abs(days)} días · Confirma la próxima renovación"
+        unit = "day" if days == -1 else "days"
+        message = f"Date passed {abs(days)} {unit} ago · Confirm the next renewal"
         css = "wait"
     elif days == 0:
-        message, css = "Renueva hoy", "wait"
+        message, css = "Renews today", "wait"
     else:
-        message = f"Falta {days} día" if days == 1 else f"Faltan {days} días"
+        message = f"{days} day left" if days == 1 else f"{days} days left"
         css = "wait" if days <= 7 else "ok"
-    return (f'<div class="reset {css} subscription">Renovación: '
+    return (f'<div class="reset {css} subscription">Renewal: '
             f'<b title="{esc(value)}">{format_renewal(value)}</b> · {message}</div>')
 
 
 def render_panel(snap, sw_page=0, log_page=0):
     vpn = snap.get("vpn") or {}
     vpn_labels = {
-        "connected": ("Online", "Ruta por VPN verificada · Conexiones vinculadas al túnel"),
-        "disconnected": ("VPN desconectada", "Peticiones bloqueadas · No hay una ruta VPN válida al destino"),
-        "unknown": ("VPN sin verificar", "Peticiones bloqueadas · No se pudo verificar el túnel"),
+        "connected": ("Online", "VPN route verified · Connections bound to the tunnel"),
+        "disconnected": ("VPN disconnected", "Requests blocked · No valid VPN route to the destination"),
+        "unknown": ("VPN unverified", "Requests blocked · Could not verify the tunnel"),
     }
     vpn_title, vpn_detail = vpn_labels.get(vpn.get("state"), vpn_labels["unknown"])
     vpn_class = "on" if vpn.get("state") == "connected" and vpn.get("allowed") else "off"
@@ -1715,7 +1716,10 @@ def render_panel(snap, sw_page=0, log_page=0):
     def _row(e):
         start = not e["from"]
         frm = '<i class=hint>proxy started</i>' if start else e["from"]
-        reason = "now serving this account" if start else e["reason"]
+        reason = "now serving this account" if start else {
+            "paused_ a mano": "manually paused",
+            "la otra caduca antes": "the other account's quota resets sooner",
+        }.get(e["reason"], e["reason"])
         return (f'<tr class="{"muted" if start else ""}"><td>{switch_when(e)}</td>'
                 f'<td>{frm}</td><td><b>{e["to"]}</b></td><td>{reason}</td></tr>')
 
@@ -2000,7 +2004,7 @@ compare accounts against each other. The quota bars are the real limit.</p>
       }})
       .catch(function () {{
         var state = document.getElementById('live-state');
-        if (state) {{ state.textContent = 'Reconectando…'; }}
+        if (state) {{ state.textContent = 'Reconnecting…'; }}
       }})
       .finally(function () {{
         clearTimeout(timeout);
@@ -2187,7 +2191,7 @@ def main():
         else:
             fresh = ""
         print(f"  {account.alias:12} {account.email or '?':32} "
-              + (f"5h {pct:.0f}% · resets en {clock(in_s)}{fresh}"
+              + (f"5h {pct:.0f}% · resets in {clock(in_s)}{fresh}"
                  if pct is not None else f"no quota data ({account.quota_error})"))
 
     if restored:
@@ -2207,7 +2211,7 @@ def main():
     # subscriptions to the network with no credential at all.
     listen = os.environ.get("ESCUCHA", "127.0.0.1")
     server = Server((listen, args.port), Handler)
-    print(f"\n  MODO      {args.mode}"
+    print(f"\n  MODE      {args.mode}"
           + ("  (drain one account, then the next)"
              if args.mode == "sequential"
              else "  (each client keeps its own; borrows when drained)"))
@@ -2223,8 +2227,8 @@ def main():
         file is left empty.
         """
         save_state(pool)
-        sys.stderr.write(f"\n[proxy] TERMINA: {reason}\n")
-        sys.stderr.write(f"[proxy] sirvio {sum(a.requests for a in accounts)} requests_\n")
+        sys.stderr.write(f"\n[proxy] EXIT: {reason}\n")
+        sys.stderr.write(f"[proxy] served {sum(a.requests for a in accounts)} requests\n")
         sys.stderr.flush()
 
     for sig in (signal.SIGTERM, signal.SIGHUP):

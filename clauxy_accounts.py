@@ -22,9 +22,9 @@ def parse_renewal(value):
 
 def format_renewal(value):
     renewal = parse_renewal(value)
-    months = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
-              "agosto", "septiembre", "octubre", "noviembre", "diciembre")
-    return f"{renewal.day} de {months[renewal.month - 1]}"
+    months = ("January", "February", "March", "April", "May", "June", "July",
+              "August", "September", "October", "November", "December")
+    return f"{months[renewal.month - 1]} {renewal.day}"
 
 
 def read_renewals():

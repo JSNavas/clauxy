@@ -45,6 +45,9 @@ will be turned down unless it removes more complexity than it adds.
 - Comments explain **why**, not what. If a line looks odd, say what broke
   without it — most comments here exist because something failed in production.
 - Names in English, full words over abbreviations.
+- All product-facing text stays in English: panel labels, CLI output, errors,
+  connection status, and displayed month names. Keep this consistent regardless
+  of the language used to discuss a change. Preserve user-entered labels.
 - New behaviour comes with a test. The suite is plain functions and `assert`;
   `tests/helpers.py` has the fixtures.
 

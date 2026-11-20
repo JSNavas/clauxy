@@ -11,8 +11,8 @@ All notable changes to this project are documented here. The format follows
 - **Manual renewal dates per account.** `clauxy edit <alias> --renewal YYYY-MM-DD`
   records the user's next subscription renewal; `--clear-renewal` removes it.
   Cards show the date, days remaining, today's renewal, or a prompt to confirm
-  a past date. The confirmation and panel use Spanish
-  dates such as `29 de noviembre`; commands and storage use ISO dates. Edits
+  a past date. The confirmation and panel use English
+  dates such as `November 29`; commands and storage use ISO dates. Edits
   restart a responding proxy automatically (`--port` supports custom listeners),
   leave stopped proxies stopped, and persist separately in `subscriptions.json`. Dates are validated,
   never automatically rolled forward, and never affect account rotation.
@@ -28,8 +28,8 @@ All notable changes to this project are documented here. The format follows
   used. Quota/profile traffic uses the same transport. No Windscribe CLI or
   provider firewall setting is required.
 - **Live VPN status in the statistics panel and CLI.** The panel shows
-  `Online` and the verified interface, `VPN desconectada`, or
-  `VPN sin verificar`. Background route checks run every two seconds;
+  `Online` and the verified interface, `VPN disconnected`, or
+  `VPN unverified`. Background route checks run every two seconds;
   the panel updates every second and marks checks older than ten seconds
   unverified. `/_status.json` includes the VPN state, interface, timestamp,
   and diagnostic detail. API requests blocked by the VPN guard return 503;
@@ -91,10 +91,14 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **New interface text now follows the project's English language convention.**
+  Renewal dates and messages, VPN labels and diagnostics, reconnecting status,
+  and CLI confirmations are all in English. Existing account labels and saved
+  ISO dates are preserved. Legacy Spanish switch reasons display in English.
 - **The status panel could stop updating after a button kept focus.** Focused
   buttons no longer pause polling indefinitely. Real clicks and editable fields
   stay protected; returning to a visible tab refreshes immediately. Failed and
-  timed-out polls show `Reconectando…` and retry after a proxy restart without a
+  timed-out polls show `Reconnecting…` and retry after a proxy restart without a
   manual page reload. Polls do not overlap, stale responses cannot undo pager
   actions, and status responses disable caching. Browser-script behavior is
   covered by an executable Node test in CI.

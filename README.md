@@ -58,7 +58,7 @@ redirects are blocked. `CLAUXY_UPSTREAM` must be a public HTTPS destination.
 DNS uses the system resolver; configure VPN DNS if DNS privacy is required.
 
 The panel shows **Online** when a destination route through the tunnel is
-verified, or **VPN desconectada / VPN sin verificar** when it cannot be used.
+verified, or **VPN disconnected / VPN unverified** when it cannot be used.
 It refreshes independently of traffic. Blocked API requests receive HTTP 503;
 the local panel remains available. New requests resume when a valid route returns.
 Online describes the verified route, not the health of Anthropic or proof of
@@ -88,7 +88,7 @@ connection checks its own destination again, independently of the display.
     "allowed": true,
     "checked_at": 1795163061.5,
     "interface": "utun420",
-    "detail": "Ruta al destino verificada por el túnel VPN"
+    "detail": "Destination route verified through the VPN tunnel"
   }
 }
 ```
@@ -100,8 +100,8 @@ future connections. Interface names vary by machine and provider.
 | Panel state | Meaning / action |
 |---|---|
 | Online | A public upstream address has a verified active tunnel route. |
-| VPN desconectada | No usable tunnel route, or a tunnel connection failed. Connect the VPN and check its routes to the upstream API. |
-| VPN sin verificar | Verification is unavailable or stale. Inspect `vpn.detail` and the Clauxy log; check route-tool permissions and DNS. |
+| VPN disconnected | No usable tunnel route, or a tunnel connection failed. Connect the VPN and check its routes to the upstream API. |
+| VPN unverified | Verification is unavailable or stale. Inspect `vpn.detail` and the Clauxy log; check route-tool permissions and DNS. |
 
 Split tunneling can leave the API outside the VPN even while the VPN app says
 connected. A tunnel merely existing is not enough. On Linux, verify iproute2 is
@@ -210,7 +210,7 @@ changes, so the account marked `IN USE` is the one serving right now rather
 than the one that was serving up to ten seconds ago. It pauses while the tab is
 in the background and refreshes immediately when you return. An active click or
 an editable field is preserved; leaving a button focused does not freeze updates.
-During a proxy restart it shows `Reconectando…` and retries automatically, with
+During a proxy restart it shows `Reconnecting…` and retries automatically, with
 a five-second timeout for stuck polls. No page reload is needed after account
 changes. After an upgrade that changes the browser script, reload an already-open
 tab once to load that script; subsequent proxy restarts recover automatically.
@@ -301,17 +301,17 @@ clauxy edit c2 --clear-renewal       # remove a saved date
 ```
 
 Dates use `YYYY-MM-DD`; invalid calendar dates and unknown account aliases are
-rejected. The confirmation and panel display Spanish dates such as `29 de
-noviembre`; the full ISO date remains stored and available in the status API
+rejected. The confirmation and panel display English dates such as `November 29`;
+the full ISO date remains stored and available in the status API
 and the date's tooltip. A responding proxy is restarted automatically after
 setting or clearing a date. For a custom port, add `--port 4099`. A stopped
 proxy stays stopped. This local edit also works while the VPN is disconnected.
 
 Each account card shows the manual date and calendar days remaining, using the
-machine's local date. It says `Renueva hoy` on that date, then asks you to confirm
+machine's local date. It says `Renews today` on that date, then asks you to confirm
 the next renewal once it has passed. Dates are never advanced automatically,
 and a passed date never marks a subscription expired or removes it from rotation.
-Without a date, the card says `Renovación: sin fecha registrada`.
+Without a date, the card says `Renewal: no date set`.
 
 These are informational dates supplied by you, not billing data confirmed by
 Claude. They are separate from token expiry and quota resets, persist in

@@ -21,11 +21,11 @@ def test_renewal_dates_require_real_iso_calendar_dates():
             metadata.parse_renewal(value)
 
 
-def test_spanish_renewal_format_is_independent_of_system_locale():
-    assert metadata.format_renewal("2026-11-29") == "29 de noviembre"
-    assert metadata.format_renewal("2026-11-30") == "30 de noviembre"
-    assert metadata.format_renewal("2027-01-01") == "1 de enero"
-    assert metadata.format_renewal("2026-12-31") == "31 de diciembre"
+def test_english_renewal_format_is_independent_of_system_locale():
+    assert metadata.format_renewal("2026-11-29") == "November 29"
+    assert metadata.format_renewal("2026-11-30") == "November 30"
+    assert metadata.format_renewal("2027-01-01") == "January 1"
+    assert metadata.format_renewal("2026-12-31") == "December 31"
 
 
 def test_dates_are_persistent_per_account_and_can_be_cleared():
@@ -64,15 +64,15 @@ def test_past_date_is_not_rolled_forward_or_called_expired():
         assert snap["days_remaining"] == -2
         assert snap["renewal_date"] == "2026-11-18"
         html = proxy.renewal_html(snap)
-        assert "Fecha pasada hace 2 días" in html and "Confirma" in html
+        assert "Date passed 2 days ago" in html and "Confirm" in html
         assert "expired" not in html.lower() and "vencida" not in html.lower()
 
 
 def test_panel_shows_unknown_upcoming_and_today_without_extra_disclaimer():
-    assert "sin fecha registrada" in proxy.renewal_html(None)
-    for days, expected in ((28, "Faltan 28 días"), (1, "Falta 1 día"), (0, "Renueva hoy")):
+    assert "no date set" in proxy.renewal_html(None)
+    for days, expected in ((28, "28 days left"), (1, "1 day left"), (0, "Renews today")):
         html = proxy.renewal_html({"renewal_date": "2026-12-18", "days_remaining": days})
-        assert expected in html and ">18 de diciembre</b>" in html
+        assert expected in html and ">December 18</b>" in html
         assert 'title="2026-12-18"' in html
         assert "Informativa, no confirmada por Claude" not in html
 

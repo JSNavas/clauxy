@@ -68,14 +68,14 @@ const flush = () => new Promise(resolve => setImmediate(resolve));
 
   b = browser();
   b.tick(); b.requests[0].reject(new Error('service restarting')); await flush();
-  assert.equal(b.state.textContent, 'Reconectando…');
+  assert.equal(b.state.textContent, 'Reconnecting…');
   b.tick(); b.respond(1, 'after restart'); await flush();
   assert.equal(b.live.innerHTML, 'after restart', 'retry must resume without a page reload');
   assert.equal(b.state.textContent, 'live');
 
   b = browser();
   b.tick(); b.respond(0, '', false); await flush();
-  assert.equal(b.state.textContent, 'Reconectando…', 'HTTP failures also need recovery');
+  assert.equal(b.state.textContent, 'Reconnecting…', 'HTTP failures also need recovery');
   b.tick(); b.respond(1); await flush();
   assert.equal(b.live.innerHTML, 'updated');
 

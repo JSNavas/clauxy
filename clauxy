@@ -334,8 +334,8 @@ def cmd_edit(args):
         set_renewal(args.alias, args.renewal)
     except (OSError, ValueError) as exc:
         sys.exit(f"could not save renewal date: {exc}")
-    print(f"{args.alias}: renovación el {format_renewal(args.renewal)} (manual)" if args.renewal
-          else f"{args.alias}: fecha de renovación borrada")
+    print(f"{args.alias}: renewal on {format_renewal(args.renewal)} (manual)" if args.renewal
+          else f"{args.alias}: renewal date cleared")
     apply_configuration(args)
 
 
@@ -596,7 +596,7 @@ def cmd_status(args):
           + ("  [service]" if service_loaded() else ""))
     if snap:
         vpn = snap.get("vpn", {})
-        label = "Online" if vpn.get("allowed") else "VPN desconectada o sin verificar"
+        label = "Online" if vpn.get("allowed") else "VPN disconnected or unverified"
         print(f"vpn     : {label}" + (f" ({vpn['interface']})" if vpn.get("interface") else ""))
         print(f"strategy: {snap.get('mode', '?')}")
         print(f"serving : {snap.get('active') or '- (no requests yet)'}")

@@ -82,7 +82,7 @@ def test_edit_updates_and_clears_dates_while_leaving_stopped_proxy_stopped():
         restart.assert_not_called()
 
 
-def test_edit_confirms_spanish_date_and_restarts_live_proxy_after_saving():
+def test_edit_confirms_english_date_and_restarts_live_proxy_after_saving():
     with tempfile.TemporaryDirectory() as folder, \
             patch.object(metadata, "RENEWALS_FILE", os.path.join(folder, "subscriptions.json")), \
             patch.object(cli, "all_accounts", return_value=["c3"]), \
@@ -100,7 +100,7 @@ def test_edit_confirms_spanish_date_and_restarts_live_proxy_after_saving():
             restart.assert_called_with(args)
         assert restart.call_count == 2
         assert answers.call_args.args == (4099,)
-        assert "renovación el 29 de noviembre" in output.getvalue()
+        assert "renewal on November 29" in output.getvalue()
 
 
 def test_edit_rejects_unknown_accounts_and_invalid_dates():
