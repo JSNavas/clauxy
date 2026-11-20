@@ -33,7 +33,7 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from clauxy_vpn import VPNUnavailable, require_vpn, vpn_urlopen
-from clauxy_accounts import parse_renewal, set_renewal
+from clauxy_accounts import parse_renewal, format_renewal, set_renewal
 
 if sys.version_info < (3, 10):
     sys.exit(f"clauxy needs Python 3.10 or newer (this is "
@@ -160,6 +160,21 @@ def write_label(alias, label):
         json.dump(data, fh, indent=2, sort_keys=True)
 
 
+def apply_configuration(args, running=None):
+    """Apply saved changes once, including login nested inside account setup."""
+    if getattr(args, "_defer_restart", False):
+        return
+    if not hasattr(args, "port"):
+        args.port = 4000
+    if running is None:
+        running = proxy_answers(args.port)
+    if running is not None:
+        print("applying configuration changes to the running proxy...")
+        cmd_restart(args)
+    else:
+        print("saved; the proxy is stopped and has not been started")
+
+
 def run_showing(cmd, env):
     """Runs a command, echoing its output while capturing it.
 
@@ -258,27 +273,35 @@ def cmd_add(args):
         sys.exit(f"   {message}\n\nThat token does not authenticate. Nothing saved.")
 
     where = save_token(args.alias, token, keychain=args.keychain)
-    print(f"OK. Saved to {where}")
-    if verdict == "no_quota":
-        print("   NOTE: authenticates fine but is out of quota right now.")
-        print(f"   {message}")
-        print("   The token is valid and kept; clauxy skips it until it resets.")
+    # Once the token is saved, even an interrupted optional sign-in must apply
+    # the new account. A nested login shares this one final restart.
+    deferred = getattr(args, "_defer_restart", False)
+    args._defer_restart = True
+    try:
+        print(f"OK. Saved to {where}")
+        if verdict == "no_quota":
+            print("   NOTE: authenticates fine but is out of quota right now.")
+            print(f"   {message}")
+            print("   The token is valid and kept; clauxy skips it until it resets.")
 
-    label = input("Label for the panel (email, Enter to skip): ").strip()
-    if label:
-        write_label(args.alias, label)
+        label = input("Label for the panel (email, Enter to skip): ").strip()
+        if label:
+            write_label(args.alias, label)
 
-    # Without a session credential this account shows "quota unknown" until it
-    # serves something - and an account you believe is fresh may be drained.
-    # Offering it here is the difference between a panel that informs and one
-    # that guesses.
-    print("\nQuota for this account will show up once it serves a request.")
-    print("A regular sign-in makes it visible right away, and warns you if the")
-    print("account is already drained. It is read-only and optional.")
-    if input("Sign in now? [y/N]: ").strip().lower().startswith("y"):
-        cmd_login(args)
-    else:
-        print(f"Skipped. You can do it later: clauxy login {args.alias}")
+        # Without a session credential this account shows "quota unknown" until it
+        # serves something - and an account you believe is fresh may be drained.
+        # Offering it here is the difference between a panel that informs and one
+        # that guesses.
+        print("\nQuota for this account will show up once it serves a request.")
+        print("A regular sign-in makes it visible right away, and warns you if the")
+        print("account is already drained. It is read-only and optional.")
+        if input("Sign in now? [y/N]: ").strip().lower().startswith("y"):
+            cmd_login(args)
+        else:
+            print(f"Skipped. You can do it later: clauxy login {args.alias}")
+    finally:
+        args._defer_restart = deferred
+        apply_configuration(args)
 
 
 def cmd_list(args):
@@ -301,7 +324,7 @@ def cmd_label(args):
         return
     write_label(args.alias, args.label)
     print(f"{args.alias} -> {args.label}")
-    print("restart the proxy to show it in the panel")
+    apply_configuration(args)
 
 
 def cmd_edit(args):
@@ -311,9 +334,9 @@ def cmd_edit(args):
         set_renewal(args.alias, args.renewal)
     except (OSError, ValueError) as exc:
         sys.exit(f"could not save renewal date: {exc}")
-    print(f"{args.alias}: renewal {args.renewal} (manual)" if args.renewal
-          else f"{args.alias}: renewal date cleared")
-    print("the panel updates automatically; no restart needed")
+    print(f"{args.alias}: renovación el {format_renewal(args.renewal)} (manual)" if args.renewal
+          else f"{args.alias}: fecha de renovación borrada")
+    apply_configuration(args)
 
 
 def cmd_remove(args):
@@ -342,8 +365,7 @@ def cmd_remove(args):
         print(f"could not clear renewal metadata: {exc}", file=sys.stderr)
     if running is not None and (gone or any(
             account["alias"] == args.alias for account in running.get("accounts", []))):
-        print("applying account removal to the running proxy...")
-        cmd_restart(args)
+        apply_configuration(args, running)
 
 
 def session_credential(alias):
@@ -405,18 +427,20 @@ def cmd_login(args):
     oauth = session_credential(args.alias)
     if not oauth:
         sys.exit("sign-in left no readable credential for this folder.")
-    req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage")
-    req.add_header("Authorization", "Bearer " + (oauth.get("accessToken") or ""))
-    req.add_header("anthropic-beta", "oauth-2025-04-20")
     try:
-        with vpn_urlopen(req, timeout=30) as resp:
-            usage = json.load(resp)
-        five = (usage.get("five_hour") or {}).get("utilization")
-        week = (usage.get("seven_day") or {}).get("utilization")
-        print(f"OK. {args.alias} now reports quota: 5h {five}% - weekly {week}%")
-        print("Restart the proxy to see it: clauxy stop && clauxy start")
-    except urllib.error.HTTPError as exc:
-        sys.exit(f"signed in, but quota still returns {exc.code}.")
+        req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage")
+        req.add_header("Authorization", "Bearer " + (oauth.get("accessToken") or ""))
+        req.add_header("anthropic-beta", "oauth-2025-04-20")
+        try:
+            with vpn_urlopen(req, timeout=30) as resp:
+                usage = json.load(resp)
+            five = (usage.get("five_hour") or {}).get("utilization")
+            week = (usage.get("seven_day") or {}).get("utilization")
+            print(f"OK. {args.alias} now reports quota: 5h {five}% - weekly {week}%")
+        except urllib.error.HTTPError as exc:
+            sys.exit(f"signed in, but quota still returns {exc.code}.")
+    finally:
+        apply_configuration(args)
 
 
 def service_loaded():
@@ -727,6 +751,8 @@ def main():
 
     p = sub.add_parser("add", help="register an account")
     p.add_argument("alias")
+    p.add_argument("--port", type=int, default=4000,
+                   help="port of the running proxy to restart (default: 4000)")
     p.add_argument("--keychain", action="store_true",
                    help="store the token in the macOS Keychain instead of a file")
     p.set_defaults(func=cmd_add)
@@ -737,6 +763,8 @@ def main():
     p = sub.add_parser("label", help="name an account in the panel")
     p.add_argument("alias", nargs="?")
     p.add_argument("label", nargs="?")
+    p.add_argument("--port", type=int, default=4000,
+                   help="port of the running proxy to restart (default: 4000)")
     p.set_defaults(func=cmd_label)
 
     def renewal_arg(value):
@@ -747,6 +775,8 @@ def main():
 
     p = sub.add_parser("edit", help="set or clear a manual subscription renewal date")
     p.add_argument("alias")
+    p.add_argument("--port", type=int, default=4000,
+                   help="port of the running proxy to restart (default: 4000)")
     renewal = p.add_mutually_exclusive_group(required=True)
     renewal.add_argument("--renewal", type=renewal_arg, metavar="YYYY-MM-DD")
     renewal.add_argument("--clear-renewal", dest="renewal", action="store_const", const=None,
@@ -761,6 +791,8 @@ def main():
 
     p = sub.add_parser("login", help="optional sign-in so idle accounts show quota")
     p.add_argument("alias")
+    p.add_argument("--port", type=int, default=4000,
+                   help="port of the running proxy to restart (default: 4000)")
     p.set_defaults(func=cmd_login)
 
     for name, fn, helptext in (("start", cmd_start, "run the proxy"),

@@ -20,6 +20,13 @@ def parse_renewal(value):
         raise ValueError("use a valid renewal date in YYYY-MM-DD format") from exc
 
 
+def format_renewal(value):
+    renewal = parse_renewal(value)
+    months = ("enero", "febrero", "marzo", "abril", "mayo", "junio", "julio",
+              "agosto", "septiembre", "octubre", "noviembre", "diciembre")
+    return f"{renewal.day} de {months[renewal.month - 1]}"
+
+
 def read_renewals():
     try:
         with open(RENEWALS_FILE) as fh:

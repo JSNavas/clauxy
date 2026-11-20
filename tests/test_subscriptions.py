@@ -21,6 +21,13 @@ def test_renewal_dates_require_real_iso_calendar_dates():
             metadata.parse_renewal(value)
 
 
+def test_spanish_renewal_format_is_independent_of_system_locale():
+    assert metadata.format_renewal("2026-11-29") == "29 de noviembre"
+    assert metadata.format_renewal("2026-11-30") == "30 de noviembre"
+    assert metadata.format_renewal("2027-01-01") == "1 de enero"
+    assert metadata.format_renewal("2026-12-31") == "31 de diciembre"
+
+
 def test_dates_are_persistent_per_account_and_can_be_cleared():
     with tempfile.TemporaryDirectory() as folder, \
             patch.object(metadata, "RENEWALS_FILE", os.path.join(folder, "subscriptions.json")):
@@ -65,7 +72,8 @@ def test_panel_shows_unknown_upcoming_today_and_manual_source():
     assert "sin fecha registrada" in proxy.renewal_html(None)
     for days, expected in ((28, "Faltan 28 días"), (1, "Falta 1 día"), (0, "Renueva hoy")):
         html = proxy.renewal_html({"renewal_date": "2026-12-18", "days_remaining": days})
-        assert expected in html and "2026-12-18" in html and "Fecha manual" in html
+        assert expected in html and ">18 de diciembre</b>" in html and "Fecha manual" in html
+        assert 'title="2026-12-18"' in html
         assert "no confirmada por Claude" in html
 
 

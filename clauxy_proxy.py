@@ -43,7 +43,7 @@ from datetime import datetime, timedelta, timezone
 # Resolve sibling modules even when loaded through the CLI symlink or tests.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from clauxy_vpn import VPNUnavailable, require_vpn, vpn_urlopen, vpn_status, watch_vpn
-from clauxy_accounts import subscription_snapshot
+from clauxy_accounts import subscription_snapshot, format_renewal
 
 if sys.version_info < (3, 10):
     sys.exit(f"clauxy needs Python 3.10 or newer (this is "
@@ -1551,7 +1551,8 @@ def renewal_html(subscription):
     else:
         message = f"Falta {days} día" if days == 1 else f"Faltan {days} días"
         css = "wait" if days <= 7 else "ok"
-    return (f'<div class="reset {css} subscription">Renovación: <b>{esc(value)}</b> · {message}'
+    return (f'<div class="reset {css} subscription">Renovación: '
+            f'<b title="{esc(value)}">{format_renewal(value)}</b> · {message}'
             '<small>Fecha manual · Informativa, no confirmada por Claude.</small></div>')
 
 

@@ -272,6 +272,13 @@ clauxy check                  try every account with the real Claude CLI
 clauxy login <alias>          optional, see below
 ```
 
+Account changes from `add`, `label`, `login`, `edit`, and `remove` automatically
+restart a responding proxy. You do not need a separate `clauxy restart` after
+these commands. They accept `--port` for a custom listener, and a stopped proxy
+stays stopped. Optional login inside `add` shares one final restart. Read-only
+commands and invalid edits do not restart the proxy. Explicit lifecycle commands
+(`start`, `stop`, `restart`, and `service`) keep their own lifecycle behavior.
+
 `clauxy remove <alias>` also restarts a responding proxy automatically so the
 removed token is dropped from memory and the account disappears from the panel.
 For a custom port, use `clauxy remove <alias> --port 4099`. A stopped proxy stays
@@ -290,8 +297,11 @@ clauxy edit c2 --clear-renewal       # remove a saved date
 ```
 
 Dates use `YYYY-MM-DD`; invalid calendar dates and unknown account aliases are
-rejected. The existing panel updates automatically without restarting the proxy.
-This local edit also works while the VPN is disconnected.
+rejected. The confirmation and panel display Spanish dates such as `29 de
+noviembre`; the full ISO date remains stored and available in the status API
+and the date's tooltip. A responding proxy is restarted automatically after
+setting or clearing a date. For a custom port, add `--port 4099`. A stopped
+proxy stays stopped. This local edit also works while the VPN is disconnected.
 
 Each account card shows the manual date and calendar days remaining, using the
 machine's local date. It says `Renueva hoy` on that date, then asks you to confirm

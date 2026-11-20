@@ -11,8 +11,10 @@ All notable changes to this project are documented here. The format follows
 - **Manual renewal dates per account.** `clauxy edit <alias> --renewal YYYY-MM-DD`
   records the user's next subscription renewal; `--clear-renewal` removes it.
   Cards show the date, days remaining, today's renewal, or a prompt to confirm
-  a past date, explicitly labeled manual. Edits appear live without a proxy
-  restart and persist separately in `subscriptions.json`. Dates are validated,
+  a past date, explicitly labeled manual. The confirmation and panel use Spanish
+  dates such as `29 de noviembre`; commands and storage use ISO dates. Edits
+  restart a responding proxy automatically (`--port` supports custom listeners),
+  leave stopped proxies stopped, and persist separately in `subscriptions.json`. Dates are validated,
   never automatically rolled forward, and never affect account rotation.
   Removing an account clears its renewal metadata. The status API includes
   the manual date, day count, and source.
@@ -68,6 +70,12 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **All account configuration commands apply changes automatically.** `add`,
+  `label`, `login`, `edit`, and `remove` restart a responding proxy, with
+  `--port` for custom listeners. A stopped proxy stays stopped. Nested login
+  during account setup shares one final restart, and saved account changes
+  still apply if a later optional prompt is interrupted. Read-only commands
+  do not restart the proxy.
 - **A valid VPN route is now required for outbound API traffic.** Unsupported
   systems, unavailable route tools, unknown routes, failed tunnel binding,
   private upstream destinations, and non-HTTPS upstream URLs fail closed.
