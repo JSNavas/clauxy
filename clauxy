@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from clauxy_vpn import VPNUnavailable, require_vpn, vpn_urlopen
+from clauxy_network import NetworkUnavailable, require_network, network_urlopen
 from clauxy_accounts import parse_renewal, format_renewal, set_renewal
 
 if sys.version_info < (3, 10):
@@ -182,7 +182,7 @@ def run_showing(cmd, env):
     terminal and Ctrl+C never reaches it, so an interrupted sign-in is left
     suspended in the background instead of dying.
     """
-    require_vpn()
+    require_network(external=True)
     proc = subprocess.Popen(cmd, env=env, text=True,
                             stdout=subprocess.PIPE, stderr=None, bufsize=1)
     lines = []
@@ -218,7 +218,7 @@ def token_works(token, cfg):
     request is no use here: the API answers 429 to any client it does not
     recognise as the CLI, so the CLI is the judge.
     """
-    require_vpn()
+    require_network(external=True)
     run = subprocess.run(
         ["claude", "-p", "say OK", "--model", "claude-haiku-5-5"],
         env={**os.environ, "CLAUDE_CODE_OAUTH_TOKEN": token,
@@ -240,7 +240,7 @@ def token_works(token, cfg):
 
 def cmd_add(args):
     banner("adding an account")
-    require_vpn()
+    require_network(external=True)
     require_claude_cli()
     cfg = os.path.join(SESSIONS, args.alias)
     os.makedirs(cfg, exist_ok=True)
@@ -408,7 +408,7 @@ def cmd_login(args):
     account that has not served anything yet has none. Client requests keep
     using the long-lived token; this credential is only ever read.
     """
-    require_vpn()
+    require_network(external=True)
     require_claude_cli()
     cfg = os.path.join(SESSIONS, args.alias)
     os.makedirs(cfg, exist_ok=True)
@@ -432,7 +432,7 @@ def cmd_login(args):
         req.add_header("Authorization", "Bearer " + (oauth.get("accessToken") or ""))
         req.add_header("anthropic-beta", "oauth-2025-04-20")
         try:
-            with vpn_urlopen(req, timeout=30) as resp:
+            with network_urlopen(req, timeout=30) as resp:
                 usage = json.load(resp)
             five = (usage.get("five_hour") or {}).get("utilization")
             week = (usage.get("seven_day") or {}).get("utilization")
@@ -595,9 +595,10 @@ def cmd_status(args):
     print(f"process : {'running (pid %d)' % pid if pid else 'stopped'}"
           + ("  [service]" if service_loaded() else ""))
     if snap:
-        vpn = snap.get("vpn", {})
-        label = "Online" if vpn.get("allowed") else "VPN disconnected or unverified"
-        print(f"vpn     : {label}" + (f" ({vpn['interface']})" if vpn.get("interface") else ""))
+        network = snap.get("network", snap.get("vpn", {}))
+        label = "Online" if network.get("allowed") else "disconnected or unverified"
+        mode = network.get("mode", "vpn").upper()
+        print(f"network : {mode} · {label}")
         print(f"strategy: {snap.get('mode', '?')}")
         print(f"serving : {snap.get('active') or '- (no requests yet)'}")
         for c in snap["accounts"]:
@@ -819,7 +820,7 @@ def main():
         return
     try:
         args.func(args)
-    except VPNUnavailable as exc:
+    except NetworkUnavailable as exc:
         sys.exit(str(exc))
 
 

@@ -36,7 +36,77 @@ clauxy pools them behind one URL and picks for you.
 ## Install
 
 Requires Python 3.10+, the [Claude CLI](https://claude.com/claude-code) on
-your PATH, and a VPN that routes the upstream API through an active tunnel.
+your PATH, and either a verified VPN route or an explicitly configured proxy
+for API traffic. Account setup and sign-in require VPN mode.
+
+### Connection settings: VPN or Proxy
+
+Open **Connection settings** on the Status page to choose the connection used
+by Clauxy's API, streaming responses, and quota/profile requests. VPN is the
+default for existing installations. There is no unprotected/direct mode, no
+automatic fallback from Proxy to VPN, and no fallback from either to direct
+upstream connections. Invalid settings and failed connections block requests.
+
+VPN mode detects the tunnel automatically and shows no proxy fields. Switching
+the form to Proxy reveals its settings; switching back hides and disables them
+without discarding the saved proxy.
+
+To use a proxy:
+
+1. Select **Proxy** and **HTTP CONNECT** or **SOCKS5**.
+2. Enter the host/IP and port supplied by your provider.
+3. Select **Username and password** and enter the credentials, or choose
+   **No authentication** for an IP-authorized endpoint.
+4. Optionally enter a location label such as `United States`.
+5. Click **Save & activate**. Clauxy authenticates with the proxy, opens a tunnel
+   to the configured API destination, and verifies its TLS certificate and
+   hostname **before saving anything**. If that fails, the previous active
+   settings and saved credentials remain unchanged. Successful validation saves
+   the configuration and activates Proxy mode without restarting the service.
+
+**Test proxy** checks entered settings without saving or activating them. It
+also attempts to display the exit IP using Webshare's public
+[`ipv4.webshare.io`](https://ipv4.webshare.io/) check endpoint, through the entered
+proxy. Failure of that optional IP lookup does not invalidate a successful API
+tunnel check. The last checked IP is informational; a rotating residential proxy
+can use a different exit IP for subsequent connections. The location label is
+user-entered metadata, not a verified country or geolocation guarantee.
+
+Webshare supports [HTTP and SOCKS5 on the same proxy endpoints](https://help.webshare.io/en/articles/8375305-understanding-proxy-connection-types-direct-rotating-and-backbone).
+Use the address, port, and authentication details from your provider's dashboard;
+Clauxy does not modify usernames or add country-targeting parameters.
+
+Proxy mode sends destination hostnames through CONNECT or SOCKS5 so the proxy
+resolves them. Only the proxy endpoint itself uses local DNS. Each API connection
+must establish its own authenticated tunnel and destination TLS before any API
+headers, tokens, or request body are sent. Environment/system proxy variables
+cannot override the selected transport. Proxy authentication is only sent to the
+proxy, never as an upstream API header. HTTP redirects remain blocked.
+
+Both username and password are stored locally in `~/.clauxy/network.json`
+(`CLAUXY_HOME` is respected), written atomically with mode `0600`. Saved credential
+values are never returned in HTML or JSON; the form shows placeholders instead.
+Blank credential fields retain the saved values only for the same endpoint,
+protocol, and username. Changing endpoints requires re-entering credentials.
+**Forget saved proxy** removes them and selects VPN mode. Selecting VPN preserves
+the previously saved proxy but ignores any unsaved proxy edits. Requests still
+require a valid VPN route. Connection settings writes require a loopback client,
+same-origin headers, and the page's settings token.
+
+The status banner and `clauxy status` show the selected connection. `Online` in
+Proxy mode means the proxy tunnel and destination TLS were verified, not that
+the Claude account has quota. Background proxy checks run every 30 seconds;
+each real request independently establishes and validates its own tunnel.
+`/_status.json` exposes the selected `network` state and redacted proxy settings.
+The existing `vpn` field remains a VPN observation, even when Proxy is selected.
+
+In Proxy mode, commands that launch the external Claude CLI and automatic
+session renewal are blocked. Those processes and browser sign-in do not use
+Clauxy's Python transport and cannot be guaranteed to follow its proxy policy.
+Switch to VPN mode for `add`, `login`, token checks, and session renewal. Existing
+accounts can still serve API traffic through the proxy; quota/profile reads work
+while their session credential remains valid. This setting affects Clauxy only,
+not the browser, every application on the computer, or independently launched CLIs.
 
 ### Required VPN protection
 
@@ -52,7 +122,7 @@ ordinary interface. IPv6 addresses routed outside the VPN are excluded even
 when IPv4 has a valid tunnel route. Linux accounts need permission to bind to a
 network device; a permission failure blocks the request.
 
-API traffic, quota, and profile requests use this transport, with TLS certificate
+In VPN mode, API traffic, quota, and profile requests use this transport, with TLS certificate
 and hostname verification. System/environment HTTP proxies are ignored and
 redirects are blocked. `CLAUXY_UPSTREAM` must be a public HTTPS destination.
 DNS uses the system resolver; configure VPN DNS if DNS privacy is required.
@@ -106,7 +176,8 @@ future connections. Interface names vary by machine and provider.
 Split tunneling can leave the API outside the VPN even while the VPN app says
 connected. A tunnel merely existing is not enough. On Linux, verify iproute2 is
 installed and the service account can use `SO_BINDTODEVICE`. A VPN implemented
-only as a browser extension or HTTP proxy does not satisfy this guard.
+only as a browser extension or HTTP proxy does not satisfy the VPN guard; select
+Proxy mode explicitly to use an HTTP CONNECT or SOCKS5 endpoint instead.
 
 After upgrading a running checkout, run `clauxy restart` to load the new code.
 There is no build step. Restarting does not change VPN or firewall settings.

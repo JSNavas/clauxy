@@ -26,5 +26,5 @@ jobs:
           node tests/test_panel_refresh.js < "$RUNNER_TEMP/clauxy-panel.html"
       - name: Both entry points parse
         run: |
-          python3 -m py_compile clauxy clauxy_proxy.py clauxy_vpn.py clauxy_accounts.py
+          python3 -m py_compile clauxy clauxy_proxy.py clauxy_vpn.py clauxy_accounts.py clauxy_network.py
           python3 clauxy --help > /dev/null

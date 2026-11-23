@@ -25,6 +25,7 @@ import math
 import os
 import re
 import shutil
+import secrets
 import signal
 import socketserver
 import subprocess
@@ -42,7 +43,10 @@ from datetime import datetime, timedelta, timezone
 
 # Resolve sibling modules even when loaded through the CLI symlink or tests.
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
-from clauxy_vpn import VPNUnavailable, require_vpn, vpn_urlopen, vpn_status, watch_vpn
+from clauxy_vpn import vpn_status
+from clauxy_network import (NetworkUnavailable, require_network, network_urlopen,
+                            network_snapshot, watch_network, config_from_form,
+                            activate_config, check_proxy)
 from clauxy_accounts import subscription_snapshot, format_renewal
 
 if sys.version_info < (3, 10):
@@ -278,8 +282,8 @@ def renew_session(alias):
     long-lived work token and renews nothing.
     """
     try:
-        require_vpn()
-    except VPNUnavailable:
+        require_network(external=True)
+    except NetworkUnavailable:
         return None
     binary = claude_cli()
     # Realpath, like session_credential: the Keychain entry is keyed by the
@@ -638,8 +642,8 @@ class Account:
                 f"too many quota checks - retrying in {clock(self.probe_wait)}")
             return
         try:
-            require_vpn()
-        except VPNUnavailable as exc:
+            require_network()
+        except NetworkUnavailable as exc:
             self.quota_error = str(exc)
             return
         self.session_expired = False
@@ -655,7 +659,7 @@ class Account:
             req.add_header("Authorization", "Bearer " + credential)
             req.add_header("anthropic-beta", "oauth-2025-04-20")
             try:
-                with vpn_urlopen(req, timeout=30) as resp:
+                with network_urlopen(req, timeout=30) as resp:
                     item = json.loads(resp.read())
             except urllib.error.HTTPError as exc:
                 # Not an error: a work token simply cannot read telemetry.
@@ -681,6 +685,10 @@ class Account:
                                  f"quota unknown - run: clauxy login {self.alias}"
                                  if exc.code in (401, 403)
                                  else f"could not read quota (HTTP {exc.code})")
+                continue
+            except NetworkUnavailable as exc:
+                if target == "quota":
+                    error = str(exc)
                 continue
             except Exception as exc:
                 if target == "quota":
@@ -1144,6 +1152,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     pool = None
     verbose = False
+    network_token = secrets.token_urlsafe(32)
 
     def handle_error(self, request, client_address):
         # The default prints the traceback and carries on; make it explicit
@@ -1169,6 +1178,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _panel(self, as_json, query=None):
         snap = self.pool.snapshot()
         snap["vpn"] = vpn_status()
+        snap["network"] = network_snapshot()
         if as_json:
             self._envia(json.dumps(snap, indent=2).encode(),
                         "application/json; charset=utf-8")
@@ -1198,6 +1208,65 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", "0")
         self.end_headers()
 
+    def _network(self):
+        """Keep proxy credentials local and reject cross-site settings writes."""
+        def reply(payload, status=200):
+            self._envia(json.dumps(payload).encode(), "application/json; charset=utf-8", status)
+
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin")
+        try:
+            import ipaddress
+            local = ipaddress.ip_address(self.client_address[0]).is_loopback
+            hostname = urllib.parse.urlsplit("http://" + host).hostname
+            origin_url = urllib.parse.urlsplit(origin) if origin else None
+        except ValueError:
+            local, hostname, origin_url = False, None, None
+        if (not local or hostname not in ("localhost", "127.0.0.1", "::1")
+                or self.headers.get("Sec-Fetch-Site") == "cross-site"
+                or (origin and (not origin_url or origin_url.scheme not in ("http", "https")
+                                or origin_url.netloc.lower() != host.lower()))):
+            self.close_connection = True
+            reply({"ok": False, "message": "Connection settings require a same-origin loopback request"}, 403)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 16384:
+                self.close_connection = True
+                raise ValueError("Connection settings payload is too large or empty")
+            fields = urllib.parse.parse_qs(self.rfile.read(length).decode(), keep_blank_values=True)
+            form = {key: values[-1] for key, values in fields.items()}
+            if not secrets.compare_digest(form.get("token", "").encode(), self.network_token.encode()):
+                reply({"ok": False, "message": "Connection restarted; retrying with the current settings token",
+                       "csrf_token": self.network_token}, 403)
+                return
+            action = form.get("action", "save")
+            if action == "forget":
+                result = activate_config({"mode": "vpn", "proxy": None})
+                result["message"] = "Saved proxy removed. VPN mode is selected."
+            else:
+                config = config_from_form(dict(form, mode="proxy") if action == "test" else form)
+                if action == "test":
+                    if not config["proxy"]:
+                        raise ValueError("Enter the proxy settings to test")
+                    result = check_proxy(config["proxy"], report_ip=True)
+                    result["message"] += " · Active settings unchanged"
+                elif action == "save":
+                    result = activate_config(config)
+                    if config["mode"] == "proxy":
+                        result["message"] = "Proxy tested, saved, and activated. " + result["message"]
+                else:
+                    raise ValueError("Unknown connection settings action")
+            reply(dict(result, saved=action != "test", network=network_snapshot()))
+        except UnicodeDecodeError:
+            reply({"ok": False, "message": "Invalid connection settings encoding"}, 400)
+        except ValueError as exc:
+            reply({"ok": False, "message": str(exc)}, 400)
+        except NetworkUnavailable as exc:
+            reply({"ok": False, "message": str(exc) + ". Active settings were not changed."}, 400)
+        except OSError:
+            reply({"ok": False, "message": "Could not save connection settings. Active settings were not changed."}, 500)
+
     # -- proxy ---------------------------------------------------------------
 
     def _handle(self, method):
@@ -1218,6 +1287,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             return
         route, _, query = self.path.partition("?")
+        if route == "/_network":
+            if method == "POST":
+                self._network()
+            else:
+                self.send_error(405, "Use POST for connection settings")
+            return
         if route in ("/_status", "/_status.json"):
             self._panel(route.endswith(".json"),
                         urllib.parse.parse_qs(query))
@@ -1227,8 +1302,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            require_vpn()
-        except VPNUnavailable as exc:
+            require_network()
+        except NetworkUnavailable as exc:
             self.send_error(503, str(exc))
             self.close_connection = True
             return
@@ -1264,7 +1339,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 status, resp_headers, stream, error = self._attempt(
                     method, headers, body, account,
                 )
-            except VPNUnavailable as exc:
+            except NetworkUnavailable as exc:
                 self.send_error(503, str(exc))
                 return
             if error is not None:
@@ -1349,9 +1424,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         request.add_header("Authorization", "Bearer " + account.token)
         request.add_header("Host", "api.anthropic.com")
         try:
-            resp = vpn_urlopen(request, timeout=900)
+            resp = network_urlopen(request, timeout=900)
             return resp.status, resp.headers, resp, None
-        except VPNUnavailable:
+        except NetworkUnavailable:
             raise
         except urllib.error.HTTPError as exc:
             # An HTTPError is still a response with a body: this is how the
@@ -1557,8 +1632,56 @@ def renewal_html(subscription):
             f'<b title="{esc(value)}">{format_renewal(value)}</b> · {message}</div>')
 
 
+def network_settings_html(network, token):
+    proxy = network.get("proxy") or {}
+    def field(name):
+        return esc(str(proxy.get(name, "")), quote=True)
+    mode = network.get("mode", "vpn")
+    protocol = proxy.get("type", "http")
+    authenticated = proxy.get("has_username", not bool(proxy))
+    username_hint = ("Stored. Leave blank to keep it for this endpoint."
+                     if proxy.get("has_username") else "Proxy username")
+    password_hint = ("Stored. Leave blank to keep it for this endpoint."
+                     if proxy.get("has_password") else "Proxy password")
+    return f"""<details class="network-settings" id="connection-settings">
+<summary>Connection settings</summary>
+<form id="network-form" method="post" action="/_network" autocomplete="off">
+  <input type="hidden" name="token" value="{esc(token, quote=True)}">
+  <div class="network-fields network-mode">
+    <label>Mode<select name="mode">
+      <option value="vpn" {'selected' if mode != 'proxy' else ''}>VPN</option>
+      <option value="proxy" {'selected' if mode == 'proxy' else ''}>Proxy</option>
+    </select></label>
+  </div>
+  <p class="detail" id="vpn-auto-note" {'hidden' if mode == 'proxy' else ''}>VPN detection is automatic. No proxy settings or credentials are required.</p>
+  <fieldset id="proxy-fields" class="network-fields" aria-label="Proxy settings" {'hidden disabled' if mode != 'proxy' else ''}>
+    <label>Proxy protocol<select name="proxy_type">
+      <option value="http" {'selected' if protocol == 'http' else ''}>HTTP CONNECT</option>
+      <option value="socks5" {'selected' if protocol == 'socks5' else ''}>SOCKS5</option>
+    </select></label>
+    <label>Proxy authentication<select name="proxy_auth">
+      <option value="password" {'selected' if authenticated else ''}>Username and password</option>
+      <option value="none" {'selected' if not authenticated else ''}>No authentication</option>
+    </select></label>
+    <label>Host or IP<input name="proxy_host" value="{field('host')}" placeholder="proxy.example.com" maxlength="253"></label>
+    <label>Port<input name="proxy_port" value="{field('port')}" type="number" min="1" max="65535" placeholder="8080"></label>
+    <label>Username<input name="proxy_username" placeholder="{username_hint}" maxlength="255" autocomplete="off"></label>
+    <label>Password<input name="proxy_password" type="password" autocomplete="new-password" placeholder="{password_hint}" maxlength="255"></label>
+    <label>Location label (optional)<input name="proxy_location" value="{field('location')}" placeholder="United States" maxlength="80"></label>
+  </fieldset>
+  <p class="detail" data-proxy-only {'hidden' if mode != 'proxy' else ''}>Save &amp; activate tests the proxy before saving. If it fails, your active settings stay unchanged. There is no direct-network fallback.</p>
+  <p class="detail" data-proxy-only {'hidden' if mode != 'proxy' else ''}>Saved credentials are stored only on this machine. Blank credential fields keep them for the same endpoint. Account sign-in and automatic session renewal require VPN mode.</p>
+  <div class="actions">
+    <button name="action" value="save">Save &amp; activate</button>
+    <button name="action" value="test" data-proxy-only {'hidden' if mode != 'proxy' else ''}>Test proxy</button>
+    <button name="action" value="forget" data-proxy-only {'hidden' if mode != 'proxy' else ''} {'disabled' if not proxy else ''}>Forget saved proxy</button>
+  </div>
+  <p id="network-result" class="detail" role="status" aria-live="polite"></p>
+</form></details>"""
+
+
 def render_panel(snap, sw_page=0, log_page=0):
-    vpn = snap.get("vpn") or {}
+    vpn = snap.get("network") or snap.get("vpn") or {}
     vpn_labels = {
         "connected": ("Online", "VPN route verified · Connections bound to the tunnel"),
         "disconnected": ("VPN disconnected", "Requests blocked · No valid VPN route to the destination"),
@@ -1567,6 +1690,17 @@ def render_panel(snap, sw_page=0, log_page=0):
     vpn_title, vpn_detail = vpn_labels.get(vpn.get("state"), vpn_labels["unknown"])
     vpn_class = "on" if vpn.get("state") == "connected" and vpn.get("allowed") else "off"
     vpn_detail += (" · " + esc(vpn["interface"])) if vpn.get("interface") else ""
+    if vpn.get("mode") == "proxy":
+        proxy = vpn.get("proxy") or {}
+        vpn_title = "Online" if vpn.get("allowed") else "Proxy disconnected" if vpn.get("state") == "disconnected" else "Proxy unverified"
+        endpoint = f"{proxy.get('host', '')}:{proxy.get('port', '')}"
+        vpn_detail = "Proxy · " + esc(endpoint) + " · " + esc(vpn.get("detail", "Requests blocked"))
+        if proxy.get("location"):
+            vpn_detail += " · Location label: " + esc(proxy["location"])
+        if vpn.get("exit_ip"):
+            vpn_detail += " · Last checked exit IP: " + esc(vpn["exit_ip"])
+    elif vpn.get("mode") == "blocked":
+        vpn_title, vpn_detail = "Connection blocked", esc(vpn.get("detail", "Invalid connection settings"))
     queue = snap.get("queue") or [c["alias"] for c in snap["accounts"] if c["available_"]]
     # Before the first request there is no "active" account: show the one that
     # will serve, which is what you want to know when you open the panel.
@@ -1789,6 +1923,7 @@ idle accounts too.</p>
 @media(prefers-color-scheme:dark){{:root{{--bg:#0d0f12;--card:#16191e;--fg:#e8eaed;
 --mut:#9aa0a6;--line:#2a2e35;--fill:#60a5fa;--act:#60a5fa}}}}
 *{{box-sizing:border-box}}
+[hidden]{{display:none!important}}
 body{{margin:0;padding:24px 16px 48px;background:var(--bg);color:var(--fg);
 font:14px/1.55 -apple-system,system-ui,sans-serif;max-width:860px;margin-inline:auto}}
 h1{{font-size:19px;margin:0}}
@@ -1882,8 +2017,17 @@ tr.muted td{{color:var(--mut)}}
 .account-summary{{display:flex;flex-direction:column;align-items:flex-start;gap:5px;
 background:var(--bg);border-radius:8px;padding:9px 12px;margin:0 0 12px}}
 .account-summary>.reset{{background:transparent;padding:0;margin:0}}
+.network-settings{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:0 0 16px}}
+.network-settings summary{{cursor:pointer;font-weight:600;font-size:12px}}
+#network-result.ok{{color:var(--ok)}}
+.network-fields{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:14px}}
+.network-mode{{max-width:220px}}
+fieldset.network-fields{{border:0;padding:0;min-width:0;margin-inline:0}}
+.network-fields label{{display:flex;flex-direction:column;gap:4px;color:var(--mut);font-size:12px}}
+.network-fields input,.network-fields select{{font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:7px;width:100%;min-width:0}}
 </style>
-<div id=live data-sw="{sw_page}" data-log="{log_page}">
+{network_settings_html(vpn, Handler.network_token)}
+<div id=live data-sw="{sw_page}" data-log="{log_page}" data-network-token="{Handler.network_token}">
 <div class=top>
   <h1>clauxy <button id="open-cmds" class="btn-cmds">Commands</button></h1>
   <div class=val><b>{money(snap['usd_total'])}</b> · {snap['requests__total']} requests
@@ -1996,6 +2140,9 @@ compare accounts against each other. The quota bars are the real limit.</p>
         live.innerHTML = fresh.innerHTML;
         live.dataset.sw = fresh.dataset.sw;
         live.dataset.log = fresh.dataset.log;
+        if (networkForm && fresh.dataset.networkToken) {{
+          networkForm.querySelector('[name="token"]').value = fresh.dataset.networkToken;
+        }}
         // The server clamps a page past the end; follow it rather than
         // keep asking for a slice that is not there.
         pages.sw = +fresh.dataset.sw || 0;
@@ -2014,6 +2161,82 @@ compare accounts against each other. The quota bars are the real limit.</p>
   }}
 
   wire(false);
+  // This form is outside #live so polling never replaces credentials while
+  // they are being entered. The password is never rendered back by the server.
+  var networkForm = document.getElementById('network-form');
+  if (networkForm) {{
+    function updateNetworkMode() {{
+      var proxyMode = networkForm.querySelector('[name="mode"]').value === 'proxy';
+      var proxyFields = document.getElementById('proxy-fields');
+      proxyFields.hidden = !proxyMode;
+      proxyFields.disabled = !proxyMode;
+      document.getElementById('vpn-auto-note').hidden = proxyMode;
+      networkForm.querySelectorAll('[data-proxy-only]').forEach(function (element) {{
+        element.hidden = !proxyMode;
+      }});
+    }}
+    networkForm.querySelector('[name="mode"]').onchange = function () {{
+      updateNetworkMode();
+      document.getElementById('network-result').textContent = '';
+    }};
+    updateNetworkMode();
+    networkForm.onsubmit = function (event) {{
+      event.preventDefault();
+      var result = document.getElementById('network-result');
+      var action = event.submitter ? event.submitter.value : 'save';
+      var fields = new URLSearchParams(new FormData(networkForm));
+      fields.set('action', action);
+      var buttons = networkForm.querySelectorAll('button');
+      buttons.forEach(function (button) {{ button.disabled = true; }});
+      result.textContent = action === 'forget' ? 'Removing saved proxy…' : 'Checking connection…';
+      result.className = 'detail';
+      var controller = new AbortController();
+      var timeout = setTimeout(function () {{ controller.abort(); }}, 60000);
+      function submit(retry) {{
+        return fetch('/_network', {{method: 'POST', cache: 'no-store', signal: controller.signal,
+          headers: {{'Content-Type': 'application/x-www-form-urlencoded'}}, body: fields.toString()}})
+          .then(function (response) {{ return response.json(); }})
+          .then(function (payload) {{
+            if (retry && payload.csrf_token) {{
+              fields.set('token', payload.csrf_token);
+              networkForm.querySelector('[name="token"]').value = payload.csrf_token;
+              return submit(false);
+            }}
+            return payload;
+          }});
+      }}
+      submit(true)
+        .then(function (payload) {{
+          result.textContent = payload.message;
+          result.className = payload.ok ? 'detail ok' : 'detail err';
+          if (payload.ok && payload.saved) {{
+            networkForm.querySelector('[name="proxy_password"]').value = '';
+            networkForm.querySelector('[name="proxy_username"]').value = '';
+            var saved = payload.network.proxy;
+            networkForm.querySelector('[name="proxy_password"]').placeholder =
+              saved && saved.has_password ? 'Stored. Leave blank to keep it for this endpoint.' : 'Proxy password';
+            networkForm.querySelector('[name="proxy_username"]').placeholder =
+              saved && saved.has_username ? 'Stored. Leave blank to keep it for this endpoint.' : 'Proxy username';
+            networkForm.querySelector('[name="mode"]').value = payload.network.mode;
+            ['host', 'port', 'location'].forEach(function (name) {{
+              networkForm.querySelector('[name="proxy_' + name + '"]').value = saved ? saved[name] : '';
+            }});
+            networkForm.querySelector('[name="proxy_type"]').value = saved ? saved.type : 'http';
+            networkForm.querySelector('[name="proxy_auth"]').value = saved && !saved.has_username ? 'none' : 'password';
+            updateNetworkMode();
+            tick(true);
+          }}
+        }})
+        .catch(function () {{
+          result.textContent = 'Could not complete the request. Check connection status before retrying.';
+          result.className = 'detail err';
+        }})
+        .finally(function () {{
+          clearTimeout(timeout);
+          buttons.forEach(function (button) {{ button.disabled = false; }});
+        }});
+    }};
+  }}
   document.addEventListener('visibilitychange', function () {{
     if (!document.hidden) {{ tick(); }}
   }});
@@ -2096,7 +2319,7 @@ def probe(pool, port):
         if not os.path.isdir(cfg):
             cfg = os.path.join(HOME, "sessions", "_probe")
         os.makedirs(cfg, exist_ok=True)
-        require_vpn()
+        require_network(external=True)
         run = subprocess.run(
             ["claude", "-p", "di OK", "--model", "claude-haiku-5-5"],
             env={**os.environ, "ANTHROPIC_BASE_URL": base,
@@ -2174,6 +2397,10 @@ def main():
 
     stale = [a for a in accounts
              if time.time() - a.quota_at > PROBE_EVERY and not a.probe_wait]
+    # Keep Status reachable when a saved proxy is unavailable. Its health and
+    # quota checks run in background workers without delaying the listener.
+    if network_snapshot().get("mode") == "proxy":
+        stale = []
     if stale:
         print("probing each account's quota...")
     for account in accounts:
@@ -2201,7 +2428,7 @@ def main():
               + (f" · on hold: {', '.join(waiting)}" if waiting else ""))
 
     threading.Thread(target=watch_quotas, args=(pool,), daemon=True).start()
-    threading.Thread(target=watch_vpn, daemon=True).start()
+    threading.Thread(target=watch_network, daemon=True).start()
     threading.Thread(target=save_periodically, args=(pool,), daemon=True).start()
 
     Handler.pool = pool

@@ -8,6 +8,22 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **Choose VPN or Proxy from Status.** Connection settings support HTTP CONNECT
+  and SOCKS5, optional username/password authentication, and a location label.
+  VPN mode uses automatic detection and hides the proxy fields and actions;
+  they appear only when Proxy is selected.
+  Save & activate verifies the proxy tunnel and destination TLS before writing
+  private local settings; failures retain the previous configuration. Settings
+  apply to new connections without a restart. Test proxy can report an exit IP
+  without saving, and Forget saved proxy clears credentials and selects VPN.
+  Proxy credentials are never returned to the browser or status JSON. Settings
+  writes enforce loopback access, same-origin requests, and a page token.
+- **Protected egress is required for every API request.** VPN mode binds sockets
+  to verified tunnels; Proxy mode authenticates and verifies destination TLS
+  before sending API data. Neither mode falls back to direct traffic or to the
+  other mode. Proxy destination DNS is remote. Background health checks update
+  the selected connection state. External CLI sign-in and session renewal are
+  blocked in Proxy mode to prevent bypassing its transport.
 - **Manual renewal dates per account.** `clauxy edit <alias> --renewal YYYY-MM-DD`
   records the user's next subscription renewal; `--clear-renewal` removes it.
   Cards show the date, days remaining, today's renewal, or a prompt to confirm

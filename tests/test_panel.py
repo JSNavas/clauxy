@@ -121,7 +121,8 @@ def test_the_buttons_ask_for_something_the_pool_understands():
     """
     p = pool(account("a"), account("b"))
     html = proxy.render_panel(p.snapshot())
-    asked = set(re.findall(r'name="action" value="(\w+)"', html))
+    controls = re.findall(r'<form[^>]*action="/_control"[^>]*>(.*?)</form>', html, re.S)
+    asked = set(re.findall(r'name="action" value="(\w+)"', "".join(controls)))
     assert asked, "no buttons rendered"
     assert asked <= set(proxy.Pool.CONTROLS), asked - set(proxy.Pool.CONTROLS)
 

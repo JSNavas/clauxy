@@ -53,12 +53,14 @@ will be turned down unless it removes more complexity than it adds.
 
 ## Things to know before changing the hot path
 
-- **Keep upstream transport inside the VPN guard.** Use `vpn_urlopen` from
-  `clauxy_vpn.py`, which checks each destination route and binds the actual
-  socket before connecting. Never add an unbound/direct retry when a tunnel
-  fails. Preserve TLS verification and the original hostname. The panel's
-  cached VPN state must never authorize a connection. Keep the display and
-  security documentation accurate about DNS and external CLI/browser limits.
+- **Use the selected protected transport.** Use `network_urlopen` from
+  `clauxy_network.py`. VPN mode delegates to interface-bound sockets; Proxy mode
+  establishes HTTP CONNECT/SOCKS5 tunnels with destination TLS. Never add a direct
+  retry or automatic failover to the other mode. Proxy activation must validate
+  before persisting credentials. Never render saved credential values or forward
+  proxy authorization to the API. Cached display state never authorizes a socket.
+  External CLI launches use `require_network(external=True)` and remain blocked
+  in Proxy mode. Keep DNS, location-label, and external-process limits documented.
 - **Requests pass through untouched.** Only the `Authorization` header is
   swapped. The upstream answers differently to a client it does not recognise,
   so the caller's own headers and body must survive verbatim.

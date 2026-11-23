@@ -136,14 +136,14 @@ def test_login_applies_new_session_even_if_quota_probe_fails():
     for failed_probe in (False, True):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             stack.enter_context(patch.object(cli, "SESSIONS", folder))
-            stack.enter_context(patch.object(cli, "require_vpn"))
+            stack.enter_context(patch.object(cli, "require_network"))
             stack.enter_context(patch.object(cli, "require_claude_cli"))
             stack.enter_context(patch.object(cli, "read_labels", return_value={}))
             stack.enter_context(patch.object(cli.subprocess, "run", return_value=SimpleNamespace(returncode=0)))
             stack.enter_context(patch.object(cli, "session_credential", return_value={"accessToken": "test"}))
             stack.enter_context(patch.object(cli, "proxy_answers", return_value={}))
             restart = stack.enter_context(patch.object(cli, "cmd_restart"))
-            response = stack.enter_context(patch.object(cli, "vpn_urlopen"))
+            response = stack.enter_context(patch.object(cli, "network_urlopen"))
             if failed_probe:
                 response.side_effect = cli.urllib.error.HTTPError("https://example.com", 403, "denied", {}, None)
                 with TestCase().assertRaises(SystemExit):
@@ -158,7 +158,7 @@ def test_add_applies_changes_once_after_nested_login_or_interruption():
     for interrupted in (False, True):
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             stack.enter_context(patch.object(cli, "SESSIONS", folder))
-            stack.enter_context(patch.object(cli, "require_vpn"))
+            stack.enter_context(patch.object(cli, "require_network"))
             stack.enter_context(patch.object(cli, "require_claude_cli"))
             stack.enter_context(patch.object(cli, "run_showing", return_value="sk-ant-oat01-" + "x" * 40))
             stack.enter_context(patch.object(cli, "token_works", return_value=("ok", "OK")))

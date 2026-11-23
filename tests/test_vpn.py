@@ -218,9 +218,9 @@ def test_transport_ignores_proxies_and_unwraps_vpn_errors():
 
 def test_blocked_quota_does_not_renew_or_send():
     a = account("test")
-    with patch.object(proxy, "require_vpn", side_effect=vpn.VPNUnavailable("VPN off")), \
+    with patch.object(proxy, "require_network", side_effect=vpn.VPNUnavailable("VPN off")), \
             patch.object(a, "session_token") as session, \
-            patch.object(proxy, "vpn_urlopen") as network:
+            patch.object(proxy, "network_urlopen") as network:
         a.probe_quota()
         assert a.quota_error == "VPN off"
         session.assert_not_called()
@@ -230,7 +230,7 @@ def test_blocked_quota_does_not_renew_or_send():
 def test_blocked_proxy_returns_503_but_panel_remains_available():
     handler = object.__new__(proxy.Handler)
     handler.path = "/v1/messages"
-    with patch.object(proxy, "require_vpn", side_effect=vpn.VPNUnavailable("VPN off")), \
+    with patch.object(proxy, "require_network", side_effect=vpn.VPNUnavailable("VPN off")), \
             patch.object(handler, "send_error") as error, \
             patch.object(handler, "_attempt") as attempt:
         handler._handle("POST")
@@ -245,7 +245,7 @@ def test_blocked_proxy_returns_503_but_panel_remains_available():
 def test_disconnect_between_retries_is_not_swallowed():
     handler = object.__new__(proxy.Handler)
     handler.path = "/v1/messages"
-    with patch.object(proxy, "vpn_urlopen", side_effect=vpn.VPNUnavailable("off")):
+    with patch.object(proxy, "network_urlopen", side_effect=vpn.VPNUnavailable("off")):
         try:
             handler._attempt("POST", {}, b"{}", account("test"))
         except vpn.VPNUnavailable:
@@ -254,7 +254,7 @@ def test_disconnect_between_retries_is_not_swallowed():
 
 
 def test_blocked_session_renewal_never_launches_claude():
-    with patch.object(proxy, "require_vpn", side_effect=vpn.VPNUnavailable("off")), \
+    with patch.object(proxy, "require_network", side_effect=vpn.VPNUnavailable("off")), \
             patch.object(proxy.subprocess, "run") as launch:
         assert proxy.renew_session("test") is None
         launch.assert_not_called()
@@ -269,7 +269,7 @@ def test_account_commands_block_before_launching_claude():
                    lambda: cli.cmd_login(SimpleNamespace(alias="test")),
                    lambda: cli.token_works("token", "/tmp/test"),
                    lambda: cli.run_showing(["claude", "setup-token"], {})):
-        with patch.object(cli, "require_vpn", side_effect=vpn.VPNUnavailable("off")), \
+        with patch.object(cli, "require_network", side_effect=vpn.VPNUnavailable("off")), \
                 patch.object(cli.subprocess, "run") as run, \
                 patch.object(cli.subprocess, "Popen") as popen, \
                 patch.object(cli, "banner"):
