@@ -98,6 +98,9 @@ Proxy mode means the proxy tunnel and destination TLS were verified, not that
 the Claude account has quota. Clauxy checks the configured proxy or VPN route
 once on startup, and does not check it periodically;
 each real request independently establishes and validates its own tunnel.
+After the last successful proxy check becomes old, the panel keeps it green
+as **Last proxy check passed** and explains that current connectivity is
+unknown until the next request. A failed check is shown in red.
 `/_status.json` exposes the selected `network` state and redacted proxy settings.
 The existing `vpn` field remains a VPN observation, even when Proxy is selected.
 

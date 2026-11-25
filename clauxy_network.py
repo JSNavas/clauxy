@@ -403,7 +403,7 @@ def network_snapshot():
         if cached and time.time() - cached.get("checked_at", 0) <= 90:
             status = cached
         elif cached:
-            status = dict(cached, state="unknown", allowed=False,
+            status = dict(cached, state="unknown", allowed=False, last_state=cached.get("state"),
                           detail="Last check: " + cached.get("detail", "unknown") +
                                  "; current connectivity will be checked on the next request")
         else:

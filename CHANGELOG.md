@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- Keep the last successful proxy check green while idle, explicitly labeling it
+  as the last check rather than current connectivity; no background traffic is
+  needed to maintain the display.
 - Stop automatic quota and profile polling and extra quota probes after rate
   limits. The selected network is checked once at startup, then only when a
   request or explicit connection test needs it. Idle panel refreshes are local.

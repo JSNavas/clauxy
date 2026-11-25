@@ -1724,6 +1724,10 @@ def render_panel(snap, sw_page=0, log_page=0):
     if vpn.get("mode") == "proxy":
         proxy = vpn.get("proxy") or {}
         vpn_title = "Online" if vpn.get("allowed") else "Proxy disconnected" if vpn.get("state") == "disconnected" else "Proxy ready to check"
+        if vpn.get("state") == "unknown" and vpn.get("last_state") == "connected":
+            vpn_title, vpn_class = "Last proxy check passed", "on"
+        elif vpn.get("state") == "unknown" and vpn.get("last_state") == "disconnected":
+            vpn_title, vpn_class = "Last proxy check failed", "off"
         endpoint = f"{proxy.get('host', '')}:{proxy.get('port', '')}"
         vpn_detail = "Proxy · " + esc(endpoint) + " · " + esc(vpn.get("detail", "Requests blocked"))
         if proxy.get("location"):
