@@ -57,10 +57,27 @@ def test_weekly_exhaustion_counts_even_with_a_free_hour():
     assert not drained.usable
 
 
-def test_falls_back_to_whoever_revives_soonest():
+def test_does_not_select_drained_accounts():
     p = pool(account("late", util_5h=100, reset_5h_h=5),
              account("early", util_5h=100, reset_5h_h=1))
-    assert p.pick().alias == "early"
+    assert p.pick() is None
+    assert p.order() == []
+
+
+def test_unknown_or_expired_quota_is_not_a_switch_target():
+    active = account("active", util_5h=100)
+    unknown = account("unknown")
+    unknown.quota = {}
+    partial = account("partial")
+    partial.quota.pop("five_hour")
+    no_reset = account("no_reset")
+    no_reset.quota["seven_day"].pop("resets_at")
+    p = pool(active, unknown, partial, no_reset)
+    p.active = "active"
+    for _ in range(20):
+        assert p.order() == []
+    assert p.active == "active"
+    assert p.failovers == 0
 
 
 def test_a_planned_switch_is_counted():

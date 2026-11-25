@@ -100,7 +100,7 @@ def test_never_claims_quota_it_does_not_know_about():
     blank.quota = {}
     html = proxy.render_panel(pool(blank).snapshot())
     assert "Quota available" not in html
-    assert "Quota not known yet" in html
+    assert "Quota reading missing or expired" in html
     assert "QUOTA UNKNOWN" in html
 
 

@@ -45,8 +45,8 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from clauxy_vpn import vpn_status
 from clauxy_network import (NetworkUnavailable, require_network, network_urlopen,
-                            network_snapshot, watch_network, config_from_form,
-                            activate_config, check_proxy)
+                            network_snapshot, config_from_form,
+                            activate_config, check_proxy, check_network_once)
 from clauxy_accounts import subscription_snapshot, format_renewal
 
 if sys.version_info < (3, 10):
@@ -79,7 +79,7 @@ CLI_SYSTEM = "You are Claude Code, Anthropic's official CLI for Claude."
 SYSTEM_PATHS = ("/v1/messages",)
 
 DEFAULT_COOLDOWN = 300        # si la respuesta no trae `retry-after`
-PROBE_EVERY = 60              # how often the background probe asks
+PROBE_EVERY = 60              # historical quota freshness reference
 PROFILE_EVERY = 6 * 3600      # identity barely changes; ask for it rarely
 PROBE_BACKOFF_S = 120         # `/api/oauth/usage` rate-limits separately
 MAX_COOLDOWN = 8 * 24 * 3600  # tope. Alto a proposito: el limite SEMANAL puede
@@ -333,6 +333,7 @@ def save_state(pool):
                 "cooling_until": a.cooling_until,
                 "limit_text": a.limit_text,
                 "last_status": a.last_status,
+                "auth_blocked_token": a.auth_blocked_token,
                 # Quota too: without it the bars go blank after every restart
                 # and stay blank until that account serves something.
                 "quota": a.quota,
@@ -388,6 +389,7 @@ def load_state(pool):
         account.cooling_until = saved.get("cooling_until", 0.0)
         account.limit_text = saved.get("limit_text")
         account.last_status = saved.get("last_status")
+        account.auth_blocked_token = saved.get("auth_blocked_token")
         account.quota_at = saved.get("quota_at", 0.0)
         account.profile_at = saved.get("profile_at", 0.0)
         account.probe_blocked_until = saved.get("probe_blocked_until", 0.0)
@@ -477,6 +479,8 @@ class Account:
         self.token = token
         self.cooling_until = 0.0
         self.paused = False       # pausa manual desde el panel
+        self.auth_blocked_token = None
+        self.attempt_lock = threading.Lock()
         self.requests = 0
         self.switches_away = 0
         self.limits = {}          # last values the headers reported
@@ -555,8 +559,20 @@ class Account:
     @property
     def available(self):
         return (not self.paused
+                and self.auth_blocked_token != self.token_fingerprint
                 and time.time() >= self.cooling_until
                 and not self.out_of_quota)
+
+    @property
+    def eligible(self):
+        """Only send work when both quota windows have a current reading."""
+        return (self.available and all(
+            self.window(which)[0] is not None and self.reset_at(which) is not None
+            for which in ("five_hour", "seven_day")))
+
+    @property
+    def token_fingerprint(self):
+        return hashlib.sha256(self.token.encode()).hexdigest()
 
     def window(self, which="five_hour"):
         """Percent used, and seconds until the window resets."""
@@ -720,8 +736,8 @@ class Account:
     def snapshot(self):
         return {
             "alias": self.alias,
-            "available_": self.available,
-            "paused_": self.paused,
+            "available_": self.eligible,
+            "paused_": self.paused or self.auth_blocked_token == self.token_fingerprint,
             "out_of_quota": self.out_of_quota,
             "quota_known": self.quota_known,
             "usable": self.usable,
@@ -798,7 +814,7 @@ class Pool:
 
         If none is usable, the one that comes back soonest.
         """
-        candidates = [a for a in self.accounts if a.usable]
+        candidates = [a for a in self.accounts if a.eligible and a.usable]
         if candidates:
             return min(candidates, key=lambda a: (a.reset_label("seven_day"),
                                               a._pct("five_hour")))
@@ -806,12 +822,11 @@ class Pool:
         # them but can still serve beats one that is actually drained: going
         # by "whose hour resets soonest" alone sent the work to the account on
         # cooldown, which answers 429 and bounces straight back.
-        serving = [a for a in self.accounts if a.available]
+        serving = [a for a in self.accounts if a.eligible]
         if serving:
             return min(serving, key=lambda a: (a.reset_label("seven_day"),
                                                a._pct("five_hour")))
-        alive = [a for a in self.accounts if not a.paused] or list(self.accounts)
-        return min(alive, key=lambda a: a.reset_label("five_hour"))
+        return None
 
     def switch_reason(self, current, best):
         """Why we should leave `current` for `best`, or None to stay put.
@@ -820,18 +835,20 @@ class Pool:
         expensive part: that is why we do not jump to the best account on
         every request, only when there is a clear reason.
         """
+        if best is None:
+            return None
         if current is None:
             return "startup"
         if best is current:
             return None
-        if not current.available:
+        if not current.eligible:
             # Only worth moving if the one we would move TO can actually
             # serve. When every account is dry this used to fire on every
             # single request, and since the fallback pick keeps changing its
             # mind the proxy spent its time hopping between drained accounts
             # — a hundred switches, not one of them able to answer. Staying
             # put costs nothing and keeps the log readable.
-            return "out of quota" if best.available else None
+            return "out of quota or quota unknown" if best.eligible else None
         if current.paused:
             return "manually paused"
         # What follows honours the cooldown: these are improvements, not emergencies.
@@ -859,6 +876,7 @@ class Pool:
         elif action == "resume":
             account.paused = False
             account.cooling_until = 0.0
+            account.auth_blocked_token = None
         elif action == "up":
             self.move(alias, -1)
         elif action == "down":
@@ -903,7 +921,9 @@ class Pool:
         returns a 429, so no turn is wasted finding out.
         """
         if self.only is not None:
-            return [self.only]
+            return [self.only] if self.only.eligible else []
+        if not any(a.eligible for a in self.accounts):
+            return []
         if self.mode == "sequential":
             # One account at a time, chosen by how soon its quota expires.
             # Whatever token the client sent is ignored on purpose.
@@ -918,23 +938,19 @@ class Pool:
                 head = best
             else:
                 head = current or best
-            rest = sorted((a for a in self.accounts if a is not head),
+            rest = sorted((a for a in self.accounts if a is not head and a.eligible),
                            key=lambda a: (not a.usable, a.reset_label("seven_day")))
             return [head] + rest
         with self.lock:
             # `available` already checks both windows: an account with a free
             # hour and an exhausted WEEKLY limit is just as useless.
-            free = [a for a in self.accounts if a.available]
-            busy = sorted(
-                (a for a in self.accounts if a not in free),
-                key=lambda a: a.cooling_until,
-            )
+            free = [a for a in self.accounts if a.eligible]
             if preferred is not None and preferred in free:
                 free.remove(preferred)
                 free.insert(0, preferred)
         # Accounts on hold go last: if every one is, try the one with the
         # shortest wait rather than hand the client a 429.
-        return free + busy
+        return free
 
     def snapshot(self):
         queue = [a.alias for a in self.order()]   # outside the lock: order() takes it
@@ -1334,11 +1350,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
         tried = []
         # The account the client brought wins, while it can still serve.
         preferred = self.pool.account_for_token(self.headers.get("Authorization"))
-        for account in self.pool.order(preferred):
+        ordered = self.pool.order(preferred)
+        for index, account in enumerate(ordered):
             try:
-                status, resp_headers, stream, error = self._attempt(
-                    method, headers, body, account,
-                )
+                # Serialize until response headers so concurrent requests cannot
+                # all reuse a credential after the first authentication failure.
+                with account.attempt_lock:
+                    if not account.eligible:
+                        continue
+                    status, resp_headers, stream, error = self._attempt(
+                        method, headers, body, account,
+                    )
+                    if status == 401:
+                        account.auth_blocked_token = account.token_fingerprint
+                        self.pool.dirty = True
+                    elif status in RETRYABLE:
+                        account.cool_down(parse_retry_after(resp_headers.get("retry-after")) or DEFAULT_COOLDOWN)
+                        self.pool.dirty = True
             except NetworkUnavailable as exc:
                 self.send_error(503, str(exc))
                 return
@@ -1354,14 +1382,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 account.quota.update(quota_from_headers(limits_))
                 account.quota_error = None
 
-            if status in RETRYABLE and len(tried) < len(self.pool.accounts) - 1:
+            if status in RETRYABLE and any(a.eligible for a in ordered[index + 1:]):
                 # If we know when the window resets, wait for that; otherwise
                 # fall back to retry-after.
-                body_seen = ""
+                prefetched = b""
                 try:
-                    body_seen = stream.read(2048).decode(errors="replace")
+                    prefetched = stream.read(2048)
                 except Exception:
                     pass
+                # Inspect a decoded copy, but relay the original bytes. A
+                # decode/encode round trip corrupts compressed error bodies.
+                body_seen = decompress(prefetched, resp_headers.get("content-encoding")) \
+                    .decode(errors="replace")
 
                 if not is_quota_429(body_seen):
                     # Not quota: the API is rejecting the caller. Every account
@@ -1374,7 +1406,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         self.pool.active = account.alias
                     self._relay(status, resp_headers, stream, account,
                                 requested_model, started_at, False, preferred,
-                                prefetched=body_seen.encode(errors="replace"))
+                                prefetched=prefetched)
                     return
 
                 # Store the sentence, not the envelope: the panel shows this.
@@ -1402,7 +1434,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     f"[proxy] {account.alias} returned {status}: waiting for "
                     f"{int(wait_s)}s -> switching to the next account\n"
                 )
-                threading.Thread(target=account.probe_quota, daemon=True).start()
                 continue
 
             account.requests += 1
@@ -1412,7 +1443,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         requested_model, started_at, bool(tried), preferred)
             return
 
-        self.send_error(502, "no account answered: " + ", ".join(tried))
+        self.send_error(503, "No account with confirmed available quota; refresh quota or check authentication")
 
     def _attempt(self, method, headers, body, account):
         """One upstream request. Returns (status, headers, stream, error)."""
@@ -1692,7 +1723,7 @@ def render_panel(snap, sw_page=0, log_page=0):
     vpn_detail += (" · " + esc(vpn["interface"])) if vpn.get("interface") else ""
     if vpn.get("mode") == "proxy":
         proxy = vpn.get("proxy") or {}
-        vpn_title = "Online" if vpn.get("allowed") else "Proxy disconnected" if vpn.get("state") == "disconnected" else "Proxy unverified"
+        vpn_title = "Online" if vpn.get("allowed") else "Proxy disconnected" if vpn.get("state") == "disconnected" else "Proxy ready to check"
         endpoint = f"{proxy.get('host', '')}:{proxy.get('port', '')}"
         vpn_detail = "Proxy · " + esc(endpoint) + " · " + esc(vpn.get("detail", "Requests blocked"))
         if proxy.get("location"):
@@ -1719,7 +1750,7 @@ def render_panel(snap, sw_page=0, log_page=0):
     drained = sum(1 for c in snap["accounts"] if c["waiting_s"] or c.get("out_of_quota"))
     paused = sum(1 for c in snap["accounts"] if c["paused_"])
     unknown = sum(1 for c in snap["accounts"]
-                  if not c.get("quota_known") and not c["waiting_s"]
+                  if not c["available_"] and not c["waiting_s"]
                   and not c["paused_"] and not c.get("out_of_quota"))
     parts = [f"{total - drained - paused - unknown} with quota"]
     if unknown:
@@ -1749,7 +1780,7 @@ def render_panel(snap, sw_page=0, log_page=0):
             # The header counts `out_of_quota` as drained; a card that says
             # "ready" for the same account contradicts it on the same screen.
             state, cls = "DRAINED", "wait"
-        elif not c.get("quota_known") or w5.get("stale") or w7.get("stale"):
+        elif not c["available_"]:
             state, cls = "QUOTA UNKNOWN", "idle"
         elif is_active:
             state, cls = "IN USE", "on"
@@ -1784,17 +1815,15 @@ def render_panel(snap, sw_page=0, log_page=0):
                         + (f'Back in <b>{clock(back)}</b>' if back
                            else '<b>Out of quota</b>')
                         + f'<small>{why}</small></div>')
+        elif not c["available_"] and not c["paused_"]:
+            headline = ('<div class="reset unknown">Quota reading missing or expired'
+                        '<small>A current reading for both quota windows is '
+                        'required. Use Refresh quota to check this account; '
+                        'no automatic requests are sent.</small></div>')
         elif w5["in_s"] and (w5["pct"] or 0) > 0:
             headline = (f'<div class="reset">5-hour window at '
                         f'<b>{w5["pct"]:.0f}%</b>, resets in '
                         f'<b>{clock(w5["in_s"])}</b></div>')
-        elif w5.get("stale") or w7.get("stale"):
-            headline = ('<div class="reset unknown">Quota reading has expired'
-                        '<small>A window reset since the last reading, and '
-                        'nothing has refreshed it: the account keeps being '
-                        'spent elsewhere. Send a request through clauxy, or '
-                        f'run <code>clauxy login {c["alias"]}</code>, to read '
-                        'it again.</small></div>')
         elif not c.get("quota_known"):
             headline = ('<div class="reset unknown">Quota not known yet'
                         '<small>No telemetry for this account yet. It stays in '
@@ -2263,28 +2292,13 @@ def save_periodically(pool, every=10):
             save_state(pool)
 
 
-def watch_quotas(pool, every=PROBE_EVERY):
-    """Probes every account's quota once a minute, in the background.
-
-    Spread out across the minute rather than fired together: three accounts
-    asking in the same instant is a burst, and bursts are what the endpoint
-    rate-limits on.
-    """
-    while True:
-        accounts = list(pool.accounts) or [None]
-        # One full pass per `every`, not `every` plus a pass: the gaps are
-        # carved out of the interval, not added to it.
-        gap = every / len(accounts)
-        for account in accounts:
-            time.sleep(gap)
-            # Backing off is the whole point: hammering the usage endpoint
-            # through its own rate limit is what earned the 429.
-            if account is None or account.probe_wait:
-                continue
-            try:
-                account.probe_quota()
-            except Exception:
-                pass
+def check_network_on_start():
+    try:
+        check_network_once()
+    except NetworkUnavailable as exc:
+        sys.stderr.write(f"[network] startup check failed: {exc}\n")
+    except OSError:
+        sys.stderr.write("[network] startup check failed\n")
 
 
 def probe(pool, port):
@@ -2395,21 +2409,9 @@ def main():
     # enough to earn a 429 from an endpoint that rate-limits on its own.
     restored = load_state(pool)
 
-    stale = [a for a in accounts
-             if time.time() - a.quota_at > PROBE_EVERY and not a.probe_wait]
-    # Keep Status reachable when a saved proxy is unavailable. Its health and
-    # quota checks run in background workers without delaying the listener.
-    if network_snapshot().get("mode") == "proxy":
-        stale = []
-    if stale:
-        print("probing each account's quota...")
     for account in accounts:
-        if account in stale:
-            account.probe_quota()
         pct, in_s, _ = account.window("five_hour")
-        if account in stale:
-            fresh = ""
-        elif account.probe_wait:
+        if account.probe_wait:
             # Saying nothing here is how you end up staring at figures that
             # are not being refreshed and wondering why.
             fresh = f" (not refreshing for {clock(account.probe_wait)})"
@@ -2427,9 +2429,8 @@ def main():
         print(f"  HISTORY   restored: {done} requests"
               + (f" · on hold: {', '.join(waiting)}" if waiting else ""))
 
-    threading.Thread(target=watch_quotas, args=(pool,), daemon=True).start()
-    threading.Thread(target=watch_network, daemon=True).start()
     threading.Thread(target=save_periodically, args=(pool,), daemon=True).start()
+    threading.Thread(target=check_network_on_start, daemon=True).start()
 
     Handler.pool = pool
     Handler.verbose = args.verbose

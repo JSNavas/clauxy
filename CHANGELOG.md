@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Stop automatic quota and profile polling and extra quota probes after rate
+  limits. The selected network is checked once at startup, then only when a
+  request or explicit connection test needs it. Idle panel refreshes are local.
+- Only select accounts with current, unexpired readings and reset times for
+  both quota windows. Paused, exhausted, rate-limited, or unknown accounts are
+  excluded; when none is eligible, return 503 locally. Refresh quota manually
+  to obtain new readings. A reading cannot account for consumption elsewhere
+  since it was taken.
+- Pause a credential after a 401 until it is resumed or replaced, and serialize
+  attempts per account until response headers arrive. Respect a 429/529 wait
+  before trying the same account again.
+- Preserve compressed upstream error bytes when relaying a generic 429.
+
 ### Added
 
 - **Choose VPN or Proxy from Status.** Connection settings support HTTP CONNECT
@@ -21,7 +36,7 @@ All notable changes to this project are documented here. The format follows
 - **Protected egress is required for every API request.** VPN mode binds sockets
   to verified tunnels; Proxy mode authenticates and verifies destination TLS
   before sending API data. Neither mode falls back to direct traffic or to the
-  other mode. Proxy destination DNS is remote. Background health checks update
+  other mode. Proxy destination DNS is remote. Startup and on-demand checks update
   the selected connection state. External CLI sign-in and session renewal are
   blocked in Proxy mode to prevent bypassing its transport.
 - **Manual renewal dates per account.** `clauxy edit <alias> --renewal YYYY-MM-DD`
@@ -45,7 +60,7 @@ All notable changes to this project are documented here. The format follows
   provider firewall setting is required.
 - **Live VPN status in the statistics panel and CLI.** The panel shows
   `Online` and the verified interface, `VPN disconnected`, or
-  `VPN unverified`. Background route checks run every two seconds;
+  `VPN unverified`. The route is checked on startup and on demand;
   the panel updates every second and marks checks older than ten seconds
   unverified. `/_status.json` includes the VPN state, interface, timestamp,
   and diagnostic detail. API requests blocked by the VPN guard return 503;

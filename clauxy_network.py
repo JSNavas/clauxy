@@ -376,6 +376,15 @@ def check_proxy(proxy, report_ip=False):
             (f" · Exit IP: {exit_ip}" if exit_ip else ""), "exit_ip": exit_ip}
 
 
+def check_network_once():
+    """Check the configured route once without sending an authenticated request."""
+    config = load_config()
+    if config["mode"] == "proxy":
+        return check_proxy(config["proxy"])
+    vpn.require_vpn()
+    return {"ok": True, "message": "VPN route verified"}
+
+
 def network_snapshot():
     try:
         config = load_config()
@@ -393,9 +402,13 @@ def network_snapshot():
             cached = dict(_proxy_states.get(_key(config["proxy"]), {}))
         if cached and time.time() - cached.get("checked_at", 0) <= 90:
             status = cached
+        elif cached:
+            status = dict(cached, state="unknown", allowed=False,
+                          detail="Last check: " + cached.get("detail", "unknown") +
+                                 "; current connectivity will be checked on the next request")
         else:
             status = {"state": "unknown", "allowed": False, "checked_at": 0,
-                      "detail": "Proxy connection has not been verified yet", "exit_ip": None}
+                      "detail": "Proxy will be verified automatically on the next request", "exit_ip": None}
     return dict(status, mode=config["mode"], proxy=public)
 
 

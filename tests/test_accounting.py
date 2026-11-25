@@ -60,3 +60,24 @@ def test_cost_uses_cache_pricing():
     cost = proxy.cost_usd("claude-sonnet-5-5", usage)
     expected = (1500 * 2.0 + 450 * 10.0 + 200 * 2.0 * 1.25 + 30000 * 0.2) / 1e6
     assert abs(cost - expected) < 1e-9
+
+
+def test_compressed_generic_error_is_forwarded_byte_for_byte():
+    import io
+    from unittest.mock import patch
+    from helpers import account, pool
+
+    body = gzip.compress(b'{"error":{"message":"Error"}}')
+    handler = object.__new__(proxy.Handler)
+    handler.path = "/v1/messages"
+    handler.headers = {"Content-Length": "0"}
+    handler.rfile = io.BytesIO()
+    handler.pool = pool(account("first"), account("second"))
+    response_headers = {"content-encoding": "gzip"}
+    with patch.object(proxy, "require_network"), \
+            patch.object(handler, "_attempt", return_value=(429, response_headers, io.BytesIO(body), None)), \
+            patch.object(handler, "_relay") as relay:
+        handler._handle("POST")
+    forwarded = relay.call_args.kwargs["prefetched"]
+    assert forwarded == body
+    assert gzip.decompress(forwarded) == b'{"error":{"message":"Error"}}'

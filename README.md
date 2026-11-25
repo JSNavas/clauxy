@@ -95,7 +95,8 @@ same-origin headers, and the page's settings token.
 
 The status banner and `clauxy status` show the selected connection. `Online` in
 Proxy mode means the proxy tunnel and destination TLS were verified, not that
-the Claude account has quota. Background proxy checks run every 30 seconds;
+the Claude account has quota. Clauxy checks the configured proxy or VPN route
+once on startup, and does not check it periodically;
 each real request independently establishes and validates its own tunnel.
 `/_status.json` exposes the selected `network` state and redacted proxy settings.
 The existing `vpn` field remains a VPN observation, even when Proxy is selected.
@@ -129,7 +130,7 @@ DNS uses the system resolver; configure VPN DNS if DNS privacy is required.
 
 The panel shows **Online** when a destination route through the tunnel is
 verified, or **VPN disconnected / VPN unverified** when it cannot be used.
-It refreshes independently of traffic. Blocked API requests receive HTTP 503;
+It reflects recent checks and may become unverified while idle. Blocked API requests receive HTTP 503;
 the local panel remains available. New requests resume when a valid route returns.
 Online describes the verified route, not the health of Anthropic or proof of
 the tunnel provider's encryption. No provider CLI or firewall setting is required,
@@ -145,7 +146,7 @@ exclude them or Python with application-based split tunneling.
 
 Connect your VPN, then use `clauxy status` or open
 [`http://127.0.0.1:4000/_status`](http://127.0.0.1:4000/_status).
-The background check runs every two seconds, and the panel refreshes every second.
+The panel refreshes every second without initiating a network check.
 Checks older than ten seconds are displayed as unverified. Each outbound
 connection checks its own destination again, independently of the display.
 
@@ -395,8 +396,8 @@ restarts. Removing an account clears its saved date. Account objects in
 
 Quota arrives free in the `anthropic-ratelimit-unified-*` headers of every
 response — no extra request, no credential that expires. But an account that
-has not served anything yet has no headers, so the panel says **"quota not
-known yet"**. It never claims an unknown account has quota: one you believe is
+has not served anything yet has no headers, so the panel reports a missing or
+expired quota reading. An unknown account is not selected: one you believe is
 fresh may be fully drained.
 
 `clauxy add` offers to fix that on the spot, and you can always do it later:
@@ -406,20 +407,27 @@ clauxy login <alias>
 ```
 
 It is a regular sign-in in that account's isolated config dir, used **only to
-read quota**. Requests keep going out with the long-lived token.
+read quota**. Sign-in requires VPN mode; once signed in, quota can be refreshed
+manually in Proxy mode. Requests keep going out with the long-lived token.
 
-The **Refresh quota** button and the background probe both go to
+The **Refresh quota** button goes to
 `/api/oauth/usage`, which has a rate limit of its own — separate from the quota
 it reports. If you hit it, the panel says `too many quota checks - retrying in
 …` and stops asking until it clears. That is the telemetry endpoint being busy,
 not the account being drained: the bars already on screen stay valid, and the
 proxy keeps serving normally throughout.
 
-Steady state is one request per account per minute, spread across the minute
-rather than fired together. Readings survive restarts, so restarting does not
-re-ask for something measured seconds ago, and the identity call happens once
-every six hours instead of on every pass. What actually trips the limit is a
-burst — a dozen restarts in a row, or holding down **Refresh quota**.
+Clauxy does not poll quota or profile in the background or on startup. Readings
+survive restarts and may become stale; refresh them manually when needed.
+
+An account that receives a 401 is paused for that credential until manually
+resumed or its token changes. Accounts paused or waiting for a rate limit or
+quota reset are not used for new requests; if none is available, Clauxy returns
+503 locally. Concurrent attempts for an account wait for the previous response
+headers so an authentication failure can stop subsequent attempts.
+Selection also requires current readings with reset times for both quota
+windows. If either reading is missing or expired, refresh quota manually before
+the account can serve; no account is selected merely to discover its quota.
 
 ### Reusing a sign-in you already have
 
